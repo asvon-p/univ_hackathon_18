@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 비밀정보 — 절대 커밋 금지
+.env
+*.pem
+*.key
+
+# 사용자 업로드 이미지 / 모델 가중치
+storage/
+uploads/
+*.pt
+*.pth
+*.onnx
+
+# Frontend
+node_modules/
+dist/
+fitjang-web-dist/
+
+# IDE / OS
+.vscode/*
+!.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db

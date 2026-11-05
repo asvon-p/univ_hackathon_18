@@ -1,0 +1,8 @@
+[
+  {"garment_id": "G001", "category": "top", "subcategory": "sweater", "color": "navy", "pattern": "solid", "style_candidates": ["minimal", "casual"], "thermal_level": 4, "cutout_path": "mock/G001.png", "status": "available"},
+  {"garment_id": "G002", "category": "top", "subcategory": "t-shirt", "color": "white", "pattern": "solid", "style_candidates": ["casual"], "thermal_level": 1, "cutout_path": "mock/G002.png", "status": "laundry"},
+  {"garment_id": "G005", "category": "bottom", "subcategory": "jeans", "color": "blue", "pattern": "solid", "style_candidates": ["casual"], "thermal_level": 3, "cutout_path": "mock/G005.png", "status": "available"},
+  {"garment_id": "G006", "category": "bottom", "subcategory": "slacks", "color": "beige", "pattern": "solid", "style_candidates": ["minimal"], "thermal_level": 2, "cutout_path": "mock/G006.png", "status": "available"},
+  {"garment_id": "G009", "category": "shoes", "subcategory": "sneakers", "color": "white", "pattern": "solid", "style_candidates": ["casual"], "thermal_level": null, "cutout_path": "mock/G009.png", "status": "available"},
+  {"garment_id": "G012", "category": "outerwear", "subcategory": "coat", "color": "camel", "pattern": "solid", "style_candidates": ["minimal"], "thermal_level": 5, "cutout_path": "mock/G012.png", "status": "available"}
+]
