@@ -179,7 +179,7 @@ async def signup_submit(
 
 # ---- 프로필 (키·몸무게·나이·성별, 모두 선택) ----------------------------------
 @router.get("/profile", response_class=HTMLResponse)
-async def profile_page(request: Request, welcome: int = 0):
+async def profile_page(request: Request, welcome: int = 0, done: str = ""):
     token = request.cookies.get(TOKEN_COOKIE)
     if not token:
         return go_login(request)
@@ -205,6 +205,8 @@ async def profile_page(request: Request, welcome: int = 0):
         bare=bool(welcome),
         welcome=bool(welcome),
         form=ProfileForm.from_profile(profile),
+        body_photo=profile.body_photo_updated_at,
+        notice=DONE_MESSAGES.get(done),
     )
 
 
@@ -237,6 +239,7 @@ async def profile_submit(
             welcome=bool(welcome),
             form=form,
             errors=errors,
+            body_photo=await body_photo_version(token),
         )
     try:
         await auth.save_profile(token, profile)
@@ -252,7 +255,10 @@ async def profile_submit(
             welcome=bool(welcome),
             form=form,
             server_error=e.message,
+            body_photo=await body_photo_version(token),
         )
+    if welcome:  # 가입 직후: 1/2 신체 정보 → 2/2 전신 사진
+        return RedirectResponse("/profile/body-photo?welcome=1", status_code=303)
     return RedirectResponse("/wardrobe?done=saved", status_code=303)
 
 
@@ -311,6 +317,114 @@ class ProfileForm:
         if self.gender not in {g for g, _ in GENDERS}:
             errors["gender"] = "성별을 다시 선택해 주세요."
         return profile, errors
+
+
+# ---- 전신 사진 (FASHN VTON v1.5 착샷의 사람 사진) ------------------------------
+# 머리끝~발끝이 다 나온 세로 2:3 사진. 착샷 결과(576x864)와 같은 비율이고,
+# 결과 크기에 맞추려고 줄이지는 않음 (FASHN 권장) → 1080x1620 JPEG
+BODY_W, BODY_H = 1080, 1620
+
+
+async def body_photo_version(token: str) -> str | None:
+    """전신 사진을 올린 시각 (없거나 못 읽으면 None)."""
+    try:
+        return (await auth.get_profile(token)).body_photo_updated_at
+    except ApiError:
+        return None
+
+
+@router.get("/profile/body-photo", response_class=HTMLResponse)
+async def body_photo_page(request: Request, welcome: int = 0):
+    token = request.cookies.get(TOKEN_COOKIE)
+    if not token:
+        return go_login(request)
+    return render(
+        request,
+        "body_photo.html",
+        active="profile",
+        bare=bool(welcome),
+        welcome=bool(welcome),
+        has_photo=bool(await body_photo_version(token)),
+    )
+
+
+@router.post("/profile/body-photo", response_class=HTMLResponse)
+async def body_photo_upload(
+    request: Request,
+    file: Annotated[UploadFile | None, File()] = None,
+    welcome: Annotated[int, Form()] = 0,
+):
+    token = request.cookies.get(TOKEN_COOKIE)
+    if not token:
+        return go_login(request)
+
+    def fail(status: int, message: str) -> HTMLResponse:
+        return render(
+            request,
+            "body_photo.html",
+            status=status,
+            active="profile",
+            bare=bool(welcome),
+            welcome=bool(welcome),
+            file_error=message,
+        )
+
+    try:
+        content, content_type, size = await read_photo(file)
+    except PhotoError as e:
+        return fail(e.status, e.message)
+    if size and abs(size[0] * BODY_H - size[1] * BODY_W) > size[0] * BODY_H * 0.02:
+        return fail(400, "사진을 세로 2:3 비율로 잘라서 올려 주세요.")
+
+    try:
+        await auth.upload_body_photo(token, file.filename, content, content_type)
+    except ApiError as e:
+        if e.status == 401:
+            return logged_out()
+        return fail(http_status(e), e.message)
+    if welcome:
+        return RedirectResponse("/wardrobe?done=body_saved", status_code=303)
+    return RedirectResponse("/profile?done=body_saved", status_code=303)
+
+
+@router.post("/profile/body-photo/delete")
+async def body_photo_delete(request: Request):
+    token = request.cookies.get(TOKEN_COOKIE)
+    if not token:
+        return go_login(request)
+    try:
+        await auth.delete_body_photo(token)
+    except ApiError as e:
+        if e.status == 401:
+            return logged_out()
+        if e.status != 404:  # 이미 없으면 지운 것과 같음
+            return render(
+                request,
+                "placeholder.html",
+                status=http_status(e),
+                active="profile",
+                title="전신 사진을 지우지 못했어요",
+                message=e.message,
+                back="/profile",
+            )
+    return RedirectResponse("/profile?done=body_deleted", status_code=303)
+
+
+@router.get("/body-photo")
+async def body_photo_image(request: Request):
+    """내 전신 사진 대신 받아 주기 (토큰을 붙여 백엔드에서 받아 옴). 주소의 ?v=올린 시각으로 캐시 구분."""
+    token = request.cookies.get(TOKEN_COOKIE)
+    if not token:
+        return Response(status_code=401)
+    try:
+        content, content_type = await auth.fetch_body_photo(token)
+    except ApiError as e:
+        return Response(status_code=e.status if e.status >= 400 else 502)
+    return Response(
+        content,
+        media_type=content_type,
+        headers={"Cache-Control": "private, max-age=300"},
+    )
 
 
 # =============================================================================
@@ -453,15 +567,10 @@ async def garment_upload(
             file_error=message,
         )
 
-    if file is None or not file.filename:
-        return fail(400, "사진을 골라 주세요.")
-    content = await file.read(MAX_UPLOAD_BYTES + 1)
-    if len(content) > MAX_UPLOAD_BYTES:
-        return fail(413, "사진이 너무 커요. 10MB 이하로 올려 주세요.")
-    content_type = image_type(content)
-    if content_type is None:
-        return fail(415, "jpg 또는 png 사진만 올릴 수 있어요.")
-    size = image_size(content)
+    try:
+        content, content_type, size = await read_photo(file)
+    except PhotoError as e:
+        return fail(e.status, e.message)
     if size and abs(size[0] - size[1]) > 1:
         return fail(400, "사진을 1:1 정사각형으로 잘라서 올려 주세요.")
 
@@ -474,6 +583,27 @@ async def garment_upload(
             return logged_out()
         return fail(http_status(e), e.message)
     return RedirectResponse(f"/garments/{garment.garment_id}/confirm", status_code=303)
+
+
+class PhotoError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status, self.message = status, message
+
+
+async def read_photo(
+    file: UploadFile | None,
+) -> tuple[bytes, str, tuple[int, int] | None]:
+    """올린 사진 공통 검사 (jpg·png, 10MB) → (내용, content-type, (가로, 세로) 또는 None)."""
+    if file is None or not file.filename:
+        raise PhotoError(400, "사진을 골라 주세요.")
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise PhotoError(413, "사진이 너무 커요. 10MB 이하로 올려 주세요.")
+    content_type = image_type(content)
+    if content_type is None:
+        raise PhotoError(415, "jpg 또는 png 사진만 올릴 수 있어요.")
+    return content, content_type, image_size(content)
 
 
 def image_type(content: bytes) -> str | None:
@@ -653,6 +783,8 @@ DONE_MESSAGES = {
     "saved": "프로필을 저장했어요.",
     "updated": "정보를 저장했어요.",
     "status": "상태를 바꿨어요.",
+    "body_saved": "전신 사진을 저장했어요.",
+    "body_deleted": "전신 사진을 지웠어요.",
 }
 
 
@@ -815,9 +947,9 @@ AUTH_BASE_HTML = """{% extends "base.html" %}
   .switch { margin-top: 24px; text-align: center; font-size: .875rem; }
   .switch a { font-weight: 600; text-decoration: none; color: var(--ink); }
   .switch a:hover { text-decoration: underline; text-underline-offset: 4px; }
-  .mock { margin-top: 40px; padding: 16px; border: 1px dashed rgb(176 125 79 / .5); border-radius: var(--radius);
-          background: rgb(243 233 223 / .6); font-size: .875rem; }
-  .mock strong { color: var(--camel); }
+  .mock { margin-top: 40px; padding: 16px; border: 1px dashed var(--line); border-radius: var(--radius);
+          background: #f5f5f5; font-size: .875rem; }
+  .mock strong { color: var(--ink-soft); }
   .mock p { margin: 4px 0 8px; }
 
   @media (min-width: 640px) { .form-side { padding: 40px 32px; } }
@@ -828,12 +960,12 @@ AUTH_BASE_HTML = """{% extends "base.html" %}
     .intro { position: relative; overflow: hidden; display: flex; flex-direction: column;
              justify-content: space-between; padding: 48px; background: var(--ink); color: #fff; }
     .intro h2 { margin: 0; font-size: 2.25rem; line-height: 1.25; }
-    .intro ul { margin: 32px 0 0; padding: 0; list-style: none; color: #d6d3d1; }
+    .intro ul { margin: 32px 0 0; padding: 0; list-style: none; color: #d4d4d4; }
     .intro li { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-    .intro li::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--camel); }
+    .intro li::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
     .intro .copy { position: relative; z-index: 1; max-width: 28rem; }
-    .intro small { position: relative; z-index: 1; color: #78716c; }
-    .hanger { position: absolute; right: 48px; bottom: 112px; width: 20rem; color: #44403c; pointer-events: none; }
+    .intro small { position: relative; z-index: 1; color: #737373; }
+    .hanger { position: absolute; right: 48px; bottom: 112px; width: 20rem; color: #404040; pointer-events: none; }
   }
   @media (min-width: 1280px) { .hanger { width: 24rem; } }
 </style>
@@ -843,26 +975,19 @@ AUTH_BASE_HTML = """{% extends "base.html" %}
   <aside class="intro">
     {{ brand(inverted=True) }}
     <div class="copy">
-      <h2>내 옷장 속 옷으로,<br>오늘의 코디</h2>
-      <ul>
-        <li>사진 한 장으로 옷 등록</li>
-        <li>가진 옷으로만 코디 추천</li>
-        <li>오늘 날씨에 맞춘 조합</li>
-      </ul>
     </div>
     <small>© 2026 Fitjang</small>
     <svg class="hanger" aria-hidden="true" viewBox="0 0 400 240" fill="none" stroke="currentColor"
          stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
       <path d="M176 44c0-13 11-24 24-24s24 11 24 24c0 12-9 18-20 24l-4 4"/>
       <path d="M200 72 30 200c-8 6-4 16 6 16h328c10 0 14-10 6-16L200 72Z"/>
-      <path d="M70 216h260" stroke="#b07d4f"/>
+      <path d="M70 216h260"/>
     </svg>
   </aside>
   <main class="form-side">
     <div class="form-wrap">
       <div class="mobile-brand">
         {{ brand() }}
-        <p class="soft">내 옷장 속 옷으로, 오늘의 코디</p>
       </div>
       {% block form %}{% endblock %}
     </div>
@@ -931,6 +1056,7 @@ SIGNUP_HTML = """{% extends "auth_base.html" %}
 
 PROFILE_HTML = """{% extends "app_base.html" %}
 {% from "macros.html" import field %}
+{% from "photo_picker.html" import silhouette %}
 {% block title %}프로필{% endblock %}
 {% block page_head %}
 <style>
@@ -941,16 +1067,73 @@ PROFILE_HTML = """{% extends "app_base.html" %}
   .row { display: grid; gap: 20px; }
   .actions { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
   @media (min-width: 480px) { .row { grid-template-columns: repeat(3, 1fr); gap: 12px; } }
+  .step { margin: 0 0 6px; font-size: .8125rem; font-weight: 600; color: var(--ink-soft); }
+  .bare .profile .step { margin-top: 40px; }
+  .bare .profile .step + h1 { margin-top: 0; }
+
+  /* 전신 사진 (착샷용) */
+  .body-card { display: grid; grid-template-columns: 88px 1fr; gap: 16px; margin-top: 28px; padding: 16px;
+               border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
+  .bp-thumb { width: 88px; aspect-ratio: 2 / 3; border-radius: 10px; overflow: hidden; background: #f5f5f5; }
+  .bp-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .bp-thumb svg { width: 100%; height: 100%; display: block; }
+  .bp-thumb .sil { fill: #e5e5e5; stroke: #a3a3a3; stroke-width: 2; }
+  .bp-thumb .line { fill: none; stroke: var(--muted); stroke-width: 3; stroke-dasharray: 8 5; }
+  .body-card h2 { margin: 0; font-size: 1rem; display: flex; align-items: center; gap: 6px; }
+  .tag { padding: 2px 8px; border-radius: 6px; background: #f5f5f5; font-size: .75rem; font-weight: 600; color: var(--ink-soft); }
+  .body-card p { margin: 4px 0 12px; font-size: .875rem; }
+  .bp-btns { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+  .bp-btns > .btn, .bp-btns summary.btn { height: 38px; padding: 0 12px; font-size: .875rem; }
+  details.danger summary { list-style: none; }
+  details.danger summary::-webkit-details-marker { display: none; }
+  details.danger summary.btn { color: var(--danger); }
+  details.danger[open] summary { display: none; }
+  details.danger[open] { flex-basis: 100%; }
+  .confirm-box { scroll-margin-bottom: 96px; padding: 12px; border: 1px solid #f4c7c3; border-radius: var(--radius); background: var(--danger-soft); }
+  .confirm-box p { margin: 0 0 10px; }
+  .confirm-box form { margin: 0; }
+  .confirm-box .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .confirm-box .btn { height: 38px; font-size: .875rem; width: 100%; }
+  .btn-danger { background: var(--danger); color: #fff; }
+  .btn-danger:hover { background: #912018; }
 </style>
 {% endblock %}
 {% block content %}
 <div class="profile">
+  {% if notice %}<div class="notice" role="status" style="margin-bottom:16px">{{ notice }}</div>{% endif %}
   {% if welcome %}
-  <h1>가입을 환영해요!</h1>
-  <p class="lead soft">코디 추천에 참고할 정보예요. 모두 선택이라 비워 둬도 괜찮아요.</p>
+  <p class="step">1 / 2 · 신체 정보</p>
+  <h1>프로필</h1>
+  <p class="lead soft">코디 추천에 참고할 정보</p>
   {% else %}
   <h1>프로필</h1>
-  <p class="lead soft">코디 추천에 참고할 정보예요. 모두 선택이에요.</p>
+  <p class="lead soft">코디 추천에 참고할 정보</p>
+
+  <section class="body-card" aria-labelledby="bp-title">
+    <div class="bp-thumb">
+      {% if body_photo %}<img src="/body-photo?v={{ body_photo | urlencode }}" alt="내 전신 사진">
+      {% else %}{{ silhouette() }}{% endif %}
+    </div>
+    <div>
+      <h2 id="bp-title">전신 사진</h2>
+      {% if not body_photo %}<p class="soft">착샷을 보려면 필요해요.</p>{% endif %}
+      <div class="bp-btns">
+        <a class="btn {{ 'btn-secondary' if body_photo else 'btn-primary' }}" href="/profile/body-photo">{{ "다시 올리기" if body_photo else "전신 사진 올리기" }}</a>
+        {% if body_photo %}
+        <details class="danger" ontoggle="if (this.open) this.querySelector('.confirm-box').scrollIntoView({ block: 'nearest', behavior: 'smooth' })">
+          <summary class="btn btn-ghost">삭제</summary>
+          <div class="confirm-box" role="alertdialog" aria-label="전신 사진 삭제 확인">
+            <p>전신 사진을 삭제할까요?</p>
+            <div class="two">
+              <button type="button" class="btn btn-secondary" onclick="this.closest('details').open = false">취소</button>
+              <form method="post" action="/profile/body-photo/delete"><button class="btn btn-danger">삭제</button></form>
+            </div>
+          </div>
+        </details>
+        {% endif %}
+      </div>
+    </div>
+  </section>
   {% endif %}
 
   <form class="stack" method="post" action="/profile" novalidate data-loading="저장 중…">
@@ -981,10 +1164,116 @@ PROFILE_HTML = """{% extends "app_base.html" %}
 
     <div class="actions">
       <button type="submit" class="btn btn-primary">{{ "저장하고 시작하기" if welcome else "저장" }}</button>
-      <a class="btn btn-ghost" href="/wardrobe">{{ "건너뛰기" if welcome else "취소" }}</a>
+      <a class="btn btn-ghost" href="{{ '/profile/body-photo?welcome=1' if welcome else '/wardrobe' }}">{{ "건너뛰기" if welcome else "취소" }}</a>
     </div>
   </form>
 </div>
+{% endblock %}
+"""
+
+BODY_PHOTO_HTML = """{% extends "app_base.html" %}
+{% from "photo_picker.html" import picker_css, picker_js, silhouette, body_guide %}
+{% block title %}전신 사진{% endblock %}
+{% block page_head %}
+{{ picker_css() }}
+<style>
+  .reg { max-width: 480px; margin: 0 auto; --ar: 2 / 3; }
+  .bare .reg { padding-top: 24px; }
+  .step { margin: 0 0 6px; font-size: .8125rem; font-weight: 600; color: var(--ink-soft); }
+  .reg form { margin-top: 20px; }
+  /* 세로 2:3 틀이 한 화면에 들어오게 (찍기·자르기 중에는 설명 문장 숨김) */
+  .reg .frame { width: clamp(220px, calc((100dvh - 380px) * 2 / 3), 360px); max-width: 100%; }
+  .reg:not([data-state="choose"]) .lead { display: none; }
+  .reg .drop { aspect-ratio: auto; padding: 32px 20px; }
+  .drop .mini { display: block; height: 132px; margin: 0 auto; }
+  .drop .mini .sil { fill: #f5f5f5; stroke: var(--ink-soft); stroke-width: 2; }
+  .drop .mini .line { fill: none; stroke: var(--muted); stroke-width: 2.5; stroke-dasharray: 8 5; }
+  .guide { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .guide .sil { fill: rgb(255 255 255 / .08); stroke: rgb(255 255 255 / .8); stroke-width: 1.1; stroke-dasharray: 4 3; }
+  .guide .line { fill: none; stroke: #fcd34d; stroke-width: 1; stroke-dasharray: 5 3; }
+  .guide text { fill: #fff; font-size: 7.5px; font-weight: 600; paint-order: stroke; stroke: rgb(0 0 0 / .5); stroke-width: 2px; }
+  .cam-bar .right .btn { padding: 0 10px; gap: 4px; }
+  .cam-bar svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+  .center { margin: 0; text-align: center; }
+  .check { font-weight: 600; }
+  .privacy { font-size: .8125rem; color: var(--ink-soft); }
+</style>
+{% endblock %}
+{% block content %}
+<div class="reg" id="reg" data-state="choose">
+  {% if welcome %}<p class="step">2 / 2 · 전신 사진</p>{% endif %}
+  <h1>{{ "전신 사진 바꾸기" if has_photo else "전신 사진" }}</h1>
+  <p class="soft lead" style="margin:6px 0 0">머리끝부터 발끝까지 나오게 찍어 주세요.</p>
+
+  <form class="stack" method="post" action="/profile/body-photo" enctype="multipart/form-data"
+        novalidate data-loading="저장 중…" id="upload-form">
+    <input type="hidden" name="welcome" value="{{ 1 if welcome else 0 }}">
+    <!-- 실제로 서버에 보내는 세로 2:3 사진 (1080x1620 JPEG) -->
+    <input type="file" name="file" id="file" accept="image/jpeg" hidden>
+    <input type="file" id="pick" accept="image/jpeg,image/png" hidden>
+    <input type="file" id="snap" accept="image/jpeg,image/png" capture="environment" hidden>
+
+    <section class="s-choose">
+      <div class="drop{% if file_error %} invalid{% endif %}" id="drop">
+        <div>
+          {{ silhouette("mini") }}
+          <strong>머리끝부터 발끝까지 나오게</strong>
+          <small>세로 사진 · jpg, png · 10MB 이하</small>
+          <div class="pick-btns">
+            <button type="button" class="btn btn-primary" id="btn-camera">카메라로 찍기</button>
+            <button type="button" class="btn btn-secondary" id="btn-album">앨범에서 고르기</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="s-camera" aria-label="카메라">
+      <div class="frame cam"><video id="video" playsinline muted autoplay></video>{{ body_guide() }}<div class="count" id="countdown" aria-live="assertive"></div></div>
+      <div class="cam-bar">
+        <button type="button" class="btn btn-ghost left" id="cam-cancel">취소</button>
+        <button type="button" class="shutter" id="shutter" aria-label="사진 찍기"></button>
+        <div class="right">
+          <button type="button" class="btn btn-ghost" id="cam-timer" aria-pressed="false" aria-label="타이머">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9.5 2.5h5"/></svg><span>끔</span></button>
+          <button type="button" class="btn btn-ghost" id="cam-flip" hidden>전환</button>
+        </div>
+      </div>
+      <p class="hint center">머리끝·발끝을 노란 선 안에</p>
+    </section>
+
+    <section class="s-crop" aria-label="사진 자르기">
+      <div class="frame crop" id="crop"><img id="crop-img" alt="자를 사진">{{ body_guide() }}</div>
+      <p class="hint center">끌어서 옮기고 확대해서 노란 선 안에 맞추기</p>
+      <div class="zoom-row">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
+        <input type="range" id="zoom" min="1" max="4" step="0.01" value="1" aria-label="확대">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5v14"/></svg>
+      </div>
+      <div class="two">
+        <button type="button" class="btn btn-secondary" id="crop-cancel">다른 사진</button>
+        <button type="button" class="btn btn-primary" id="crop-ok">이대로 자르기</button>
+      </div>
+    </section>
+
+    <section class="s-done" aria-label="올릴 사진">
+      <div class="frame"><img class="result" id="result" alt="올릴 전신 사진 미리보기">{{ body_guide(sil=False) }}</div>
+      <p class="center check">머리끝부터 발끝(신발)까지 다 나왔나요?</p>
+      <button type="button" class="btn btn-secondary" id="redo">다시 찍기·고르기</button>
+    </section>
+
+    <p class="field-error" id="file-error" role="alert" {% if not file_error %}hidden{% endif %}>{{ file_error or "" }}</p>
+
+    <p class="tips">정면 · 팔 살짝 벌리기 · 단순한 배경 · 혼자 찍을 땐 타이머</p>
+
+    <div class="actions">
+      <button type="submit" class="btn btn-primary" id="upload-btn">저장</button>
+      <a class="btn btn-ghost" href="{{ '/wardrobe' if welcome else '/profile' }}">{{ "건너뛰기" if welcome else "취소" }}</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
+{% block script %}
+{{ picker_js(1080, 1620, "body.jpg", 512) }}
 {% endblock %}
 """
 
@@ -1001,14 +1290,14 @@ WARDROBE_HTML = """{% extends "app_base.html" %}
   .search { position: relative; display: flex; align-items: center; margin-top: 20px; }
   .search svg { position: absolute; left: 14px; width: 18px; height: 18px; fill: none; stroke: var(--muted);
                 stroke-width: 2; stroke-linecap: round; pointer-events: none; }
-  .search input { width: 100%; height: 44px; padding: 0 40px 0 42px; border: 1px solid var(--line); border-radius: 999px;
+  .search input { width: 100%; height: 44px; padding: 0 40px 0 42px; border: 1px solid var(--line); border-radius: 6px;
                   background: #fff; font: inherit; font-size: .9375rem; color: var(--ink); }
   .search input::placeholder { color: var(--muted); }
-  .search input:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgb(28 25 23 / .1); }
+  .search input:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgb(23 23 23 / .1); }
   .search input::-webkit-search-cancel-button { display: none; }
   .search .clear { position: absolute; right: 8px; display: grid; place-items: center; width: 28px; height: 28px;
                    border-radius: 50%; color: var(--ink-soft); text-decoration: none; font-size: 1.125rem; }
-  .search .clear:hover { background: #f5f5f4; color: var(--ink); }
+  .search .clear:hover { background: #f5f5f5; color: var(--ink); }
   .result-count { margin: 12px 0 0; font-size: .875rem; color: var(--ink-soft); }
   .result-count b { color: var(--ink); }
   .loc { margin-top: 4px; display: flex; align-items: center; gap: 4px; font-size: .75rem; color: var(--muted);
@@ -1018,36 +1307,36 @@ WARDROBE_HTML = """{% extends "app_base.html" %}
   .frow { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; margin: 0 -16px; padding: 0 16px; }
   .frow::-webkit-scrollbar { display: none; }
   .fchip { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 14px;
-           border: 1px solid var(--line); border-radius: 999px; background: #fff; text-decoration: none;
+           border: 1px solid var(--line); border-radius: 6px; background: #fff; text-decoration: none;
            font-size: .875rem; color: var(--ink); }
   .fchip:hover { border-color: var(--ink-soft); }
   .fchip small { color: var(--muted); font-size: .8125rem; }
   .fchip[aria-current="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
-  .fchip[aria-current="true"] small { color: #d6d3d1; }
+  .fchip[aria-current="true"] small { color: #d4d4d4; }
   .frow.sub .fchip { height: 32px; border-color: transparent; background: none; color: var(--ink-soft); padding: 0 10px; }
-  .frow.sub .fchip[aria-current="true"] { background: #ece9e6; color: var(--ink); font-weight: 600; }
+  .frow.sub .fchip[aria-current="true"] { background: #eeeeee; color: var(--ink); font-weight: 600; }
 
   .grid { margin-top: 20px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
-  .card { background: #fff; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; transition: border-color .15s, box-shadow .15s; }
-  .card:hover { border-color: #d6d3d1; box-shadow: 0 4px 16px rgb(28 25 23 / .06); }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; transition: border-color .15s, box-shadow .15s; }
+  .card:hover { border-color: #d4d4d4; box-shadow: 0 4px 16px rgb(23 23 23 / .06); }
   .card-link { display: block; color: inherit; text-decoration: none; }
-  .card-link:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; border-radius: 16px; }
-  .thumb { position: relative; aspect-ratio: 1; display: grid; place-items: center; background: #f5f5f4; }
+  .card-link:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; border-radius: 10px; }
+  .thumb { position: relative; aspect-ratio: 1; display: grid; place-items: center; background: #f5f5f5; }
   .thumb svg { width: 64%; height: 64%; }
   .thumb img { width: 100%; height: 100%; object-fit: cover; }
   .card.off .thumb > :not(.badge) { opacity: .45; }
-  .badge { position: absolute; top: 8px; left: 8px; padding: 3px 8px; border-radius: 999px; font-size: .75rem; font-weight: 600; }
-  .badge.laundry { background: var(--camel-soft); color: #8a5a2e; }
-  .badge.inactive { background: #e7e5e4; color: var(--ink-soft); }
+  .badge { position: absolute; top: 8px; left: 8px; padding: 3px 8px; border-radius: 6px; font-size: .75rem; font-weight: 600; }
+  .badge.laundry { background: var(--ink); color: #fff; }
+  .badge.inactive { background: #e5e5e5; color: var(--ink-soft); }
   .card-body { padding: 12px; }
   .card-body h2 { margin: 0; font-size: .9375rem; font-weight: 600; }
   .meta { margin-top: 4px; display: flex; align-items: center; gap: 6px; font-size: .8125rem; color: var(--ink-soft); }
   .dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgb(0 0 0 / .15); flex-shrink: 0; }
   .dot.multi { background: conic-gradient(#c0392b, #f2c94c, #2f7d4f, #2f5fb3, #c0392b); }
   .tags { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
-  .tags span { padding: 2px 8px; border-radius: 999px; background: #f5f5f4; font-size: .75rem; color: var(--ink-soft); }
+  .tags span { padding: 2px 8px; border-radius: 6px; background: #f5f5f5; font-size: .75rem; color: var(--ink-soft); }
 
-  .empty { margin-top: 24px; padding: 48px 24px; border: 1px dashed var(--line); border-radius: 16px;
+  .empty { margin-top: 24px; padding: 48px 24px; border: 1px dashed var(--line); border-radius: 10px;
            background: #fff; text-align: center; }
   .empty svg { width: 56px; height: 56px; color: var(--muted); fill: none; stroke: currentColor; stroke-width: 1.5;
                stroke-linecap: round; stroke-linejoin: round; }
@@ -1078,7 +1367,6 @@ WARDROBE_HTML = """{% extends "app_base.html" %}
 <section class="empty">
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5a2 2 0 1 1 2 2v1.5"/><path d="M12 8.5 3.4 15.2a1 1 0 0 0 .6 1.8h16a1 1 0 0 0 .6-1.8z"/></svg>
   <h2>아직 등록한 옷이 없어요</h2>
-  <p class="soft">사진 한 장으로 첫 옷을 등록해 보세요.</p>
   <a class="btn btn-primary" href="/garments/new">옷 등록하기</a>
 </section>
 {% elif total > 0 %}
@@ -1134,11 +1422,9 @@ WARDROBE_HTML = """{% extends "app_base.html" %}
 <section class="empty">
   {% if q %}
   <h2>‘{{ q }}’에 맞는 옷이 없어요</h2>
-  <p class="soft">다른 말로 검색하거나 종류·상태 필터를 바꿔 보세요.</p>
   <a class="btn btn-secondary" href="/wardrobe">검색·필터 초기화</a>
   {% else %}
   <h2>조건에 맞는 옷이 없어요</h2>
-  <p class="soft">다른 종류나 상태를 골라 보세요.</p>
   <a class="btn btn-secondary" href="/wardrobe">필터 초기화</a>
   {% endif %}
 </section>
@@ -1147,13 +1433,11 @@ WARDROBE_HTML = """{% extends "app_base.html" %}
 {% endblock %}
 """
 
-GARMENT_NEW_HTML = """{% extends "app_base.html" %}
-{% block title %}옷 등록{% endblock %}
-{% block page_head %}
+PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대로 찍기)·앨범(틀 비율로 자르기). 옷 등록(1:1)·전신 사진(2:3)에서 사용.
+   화면에 필요한 id: reg(data-state) file pick snap drop btn-camera btn-album video cam-cancel shutter cam-flip
+                    crop crop-img zoom crop-cancel crop-ok result redo file-error upload-btn (선택: cam-timer countdown) #}
+{% macro picker_css() %}
 <style>
-  .reg { max-width: 480px; margin: 0 auto; }
-  .step { margin: 0 0 6px; font-size: .8125rem; font-weight: 600; color: var(--camel); }
-  .reg form { margin-top: 24px; }
   .reg section { display: none; }
   .reg[data-state="choose"] .s-choose, .reg[data-state="camera"] .s-camera,
   .reg[data-state="crop"] .s-crop, .reg[data-state="done"] .s-done { display: flex; flex-direction: column; gap: 12px; }
@@ -1161,10 +1445,11 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
   .reg:not([data-state="done"]) #upload-btn { display: none; }
   .reg[data-state="camera"] .actions, .reg[data-state="crop"] .actions { display: none; }
 
-  /* 정사각형 틀 (카메라·자르기·결과 공통) */
-  .sq { position: relative; width: 100%; aspect-ratio: 1; border-radius: 16px; overflow: hidden; background: #1c1917; }
-  .sq > img.result { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .thirds { position: absolute; inset: 0; pointer-events: none; border: 1px solid rgb(255 255 255 / .5); border-radius: 16px;
+  /* 사진 틀 (카메라·자르기·결과 공통), 비율은 --ar */
+  .frame { position: relative; width: 100%; aspect-ratio: var(--ar, 1); margin: 0 auto; border-radius: 10px;
+           overflow: hidden; background: #171717; }
+  .frame > img.result { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thirds { position: absolute; inset: 0; pointer-events: none; border: 1px solid rgb(255 255 255 / .5); border-radius: 10px;
             background:
               linear-gradient(to right, transparent 33%, rgb(255 255 255 / .35) 33%, rgb(255 255 255 / .35) calc(33% + 1px),
                               transparent calc(33% + 1px), transparent 66.6%, rgb(255 255 255 / .35) 66.6%,
@@ -1174,12 +1459,13 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
                               rgb(255 255 255 / .35) calc(66.6% + 1px), transparent calc(66.6% + 1px)); }
 
   /* 1) 고르기 */
-  .drop { display: grid; place-items: center; aspect-ratio: 1; padding: 24px; border: 1.5px dashed #d6d3d1;
-          border-radius: 16px; background: #fff; text-align: center; transition: border-color .15s, background .15s; }
-  .drop.over { border-color: var(--ink); background: #fafaf9; }
+  .drop { display: grid; place-items: center; width: 100%; aspect-ratio: var(--ar, 1); margin: 0 auto; padding: 24px;
+          border: 1.5px dashed #d4d4d4; border-radius: 10px; background: #fff; text-align: center;
+          transition: border-color .15s, background .15s; }
+  .drop.over { border-color: var(--ink); background: #fafafa; }
   .drop.invalid { border-color: var(--danger); }
-  .drop svg { width: 44px; height: 44px; fill: none; stroke: var(--ink-soft); stroke-width: 1.5;
-              stroke-linecap: round; stroke-linejoin: round; }
+  .drop .ico { width: 44px; height: 44px; fill: none; stroke: var(--ink-soft); stroke-width: 1.5;
+               stroke-linecap: round; stroke-linejoin: round; }
   .drop strong { display: block; margin-top: 12px; font-size: 1rem; }
   .drop small { display: block; margin-top: 4px; color: var(--ink-soft); }
   .pick-btns { display: flex; gap: 8px; justify-content: center; margin-top: 20px; flex-wrap: wrap; }
@@ -1188,14 +1474,19 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
   /* 2-a) 카메라 */
   .cam video { width: 100%; height: 100%; object-fit: cover; display: block; }
   .cam video.mirror { transform: scaleX(-1); }
-  .cam-bar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
+  .count { position: absolute; inset: 0; display: grid; place-items: center; font-size: 5rem; font-weight: 700; color: #fff;
+           text-shadow: 0 2px 16px rgb(0 0 0 / .55); pointer-events: none; }
+  .count:empty { display: none; }
+  .cam-bar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; }
   .cam-bar .btn { height: 40px; padding: 0 12px; font-size: .9375rem; }
-  .cam-bar #cam-flip { justify-self: end; }
-  .cam-bar #cam-cancel { justify-self: start; }
+  .cam-bar .left { justify-self: start; }
+  .cam-bar .right { justify-self: end; display: flex; gap: 4px; }
+  .cam-bar #cam-timer[aria-pressed="true"] { background: var(--ink); color: #fff; }
   .shutter { width: 68px; height: 68px; border-radius: 50%; border: 4px solid var(--ink); background: #fff;
              box-shadow: inset 0 0 0 4px #fff, inset 0 0 0 30px var(--ink); cursor: pointer; }
   .shutter:active { transform: scale(.94); }
   .shutter:focus-visible { outline: 2px solid var(--ink); outline-offset: 4px; }
+  .shutter.counting { box-shadow: inset 0 0 0 4px #fff, inset 0 0 0 30px var(--danger); border-color: var(--danger); }
 
   /* 2-b) 자르기 */
   .crop { touch-action: none; cursor: grab; user-select: none; }
@@ -1206,85 +1497,16 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
   .zoom-row input { flex: 1; accent-color: var(--ink); }
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
-  .tips { margin: 0; padding: 16px 16px 16px 36px; border-radius: var(--radius); background: #f5f5f4;
-          font-size: .875rem; color: var(--ink-soft); line-height: 1.7; }
+  .tips { margin: 0; font-size: .8125rem; color: var(--ink-soft); text-align: center; line-height: 1.6; }
   .actions { display: flex; flex-direction: column; gap: 8px; }
 </style>
-{% endblock %}
-{% block content %}
-<div class="reg" id="reg" data-state="choose">
-  <p class="step">1 / 2 · 사진 올리기</p>
-  <h1>옷 등록</h1>
-  <p class="soft" style="margin:6px 0 0">사진은 1:1 정사각형으로 올려요. 종류와 색은 자동으로 채워 드려요.</p>
+{% endmacro %}
 
-  <form class="stack" method="post" action="/garments/new" enctype="multipart/form-data"
-        novalidate data-loading="사진 분석 중…" id="upload-form">
-    <!-- 실제로 서버에 보내는 1:1 사진 (자르기·촬영 결과를 여기에 넣음) -->
-    <input type="file" name="file" id="file" accept="image/jpeg" hidden>
-    <input type="file" id="pick" accept="image/jpeg,image/png" hidden>
-    <input type="file" id="snap" accept="image/jpeg,image/png" capture="environment" hidden>
-
-    <section class="s-choose">
-      <div class="drop{% if file_error %} invalid{% endif %}" id="drop">
-        <div>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9.3h16M4 14.7h16M9.3 4v16M14.7 4v16" opacity=".35"/></svg>
-          <strong>옷 사진을 1:1로 맞춰 올려요</strong>
-          <small>jpg, png · 10MB 이하 · PC에서는 끌어다 놓아도 돼요</small>
-          <div class="pick-btns">
-            <button type="button" class="btn btn-primary" id="btn-camera">카메라로 찍기</button>
-            <button type="button" class="btn btn-secondary" id="btn-album">앨범에서 고르기</button>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="s-camera" aria-label="카메라">
-      <div class="sq cam"><video id="video" playsinline muted autoplay></video><div class="thirds"></div></div>
-      <div class="cam-bar">
-        <button type="button" class="btn btn-ghost" id="cam-cancel">취소</button>
-        <button type="button" class="shutter" id="shutter" aria-label="사진 찍기"></button>
-        <button type="button" class="btn btn-ghost" id="cam-flip" hidden>카메라 전환</button>
-      </div>
-    </section>
-
-    <section class="s-crop" aria-label="사진 자르기">
-      <div class="sq crop" id="crop"><img id="crop-img" alt="자를 사진"><div class="thirds"></div></div>
-      <p class="hint">사진을 끌어서 옮기고, 아래 막대나 두 손가락으로 확대해요.</p>
-      <div class="zoom-row">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
-        <input type="range" id="zoom" min="1" max="4" step="0.01" value="1" aria-label="확대">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5v14"/></svg>
-      </div>
-      <div class="two">
-        <button type="button" class="btn btn-secondary" id="crop-cancel">다른 사진</button>
-        <button type="button" class="btn btn-primary" id="crop-ok">이대로 자르기</button>
-      </div>
-    </section>
-
-    <section class="s-done" aria-label="올릴 사진">
-      <div class="sq"><img class="result" id="result" alt="올릴 사진 미리보기"></div>
-      <button type="button" class="btn btn-secondary" id="redo">다시 찍기·고르기</button>
-    </section>
-
-    <p class="field-error" id="file-error" role="alert" {% if not file_error %}hidden{% endif %}>{{ file_error or "" }}</p>
-
-    <ul class="tips">
-      <li>한 장에 옷 한 벌만 나오게 찍어 주세요.</li>
-      <li>바닥에 펼치거나 옷걸이에 걸면 더 정확해요.</li>
-      <li>밝은 곳, 단순한 배경일수록 좋아요.</li>
-    </ul>
-
-    <div class="actions">
-      <button type="submit" class="btn btn-primary" id="upload-btn">다음</button>
-      <a class="btn btn-ghost" href="/wardrobe">취소</a>
-    </div>
-  </form>
-</div>
-{% endblock %}
-{% block script %}
+{# out_w x out_h: 올리는 JPEG 크기 (틀 비율과 같아야 함), min_side: 너무 작은 사진 거르기(px, 0이면 안 함) #}
+{% macro picker_js(out_w, out_h, filename, min_side=0) %}
 <script>
 (() => {
-  const OUT = 1080;                       // 올리는 사진 크기: 1080 x 1080 JPEG
+  const OUT_W = {{ out_w }}, OUT_H = {{ out_h }}, RATIO = OUT_W / OUT_H, MIN_SIDE = {{ min_side }};
   const MAX = 10 * 1024 * 1024, TYPES = ["image/jpeg", "image/png"];
   const $ = (id) => document.getElementById(id);
   const reg = $("reg"), fileInput = $("file"), pick = $("pick"), snap = $("snap");
@@ -1293,19 +1515,19 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
   function setState(s) { reg.dataset.state = s; uploadBtn.disabled = s !== "done"; }
   function showError(msg) { err.textContent = msg; err.hidden = !msg; drop.classList.toggle("invalid", !!msg); }
 
-  // ---- 결과(1:1 캔버스) → 업로드할 파일로 -------------------------------
+  // ---- 결과 캔버스 → 업로드할 파일로 ------------------------------------
   function finish(canvas) {
     canvas.toBlob((blob) => {
       const dt = new DataTransfer();
-      dt.items.add(new File([blob], "garment.jpg", { type: "image/jpeg" }));
+      dt.items.add(new File([blob], {{ filename | tojson }}, { type: "image/jpeg" }));
       fileInput.files = dt.files;
       $("result").src = URL.createObjectURL(blob);
       setState("done");
     }, "image/jpeg", 0.9);
   }
-  function square() {
-    const c = document.createElement("canvas"); c.width = c.height = OUT;
-    const ctx = c.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, OUT, OUT);
+  function blank() {
+    const c = document.createElement("canvas"); c.width = OUT_W; c.height = OUT_H;
+    const ctx = c.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, OUT_W, OUT_H);
     return [c, ctx];
   }
   $("redo").addEventListener("click", () => { fileInput.value = ""; showError(""); setState("choose"); });
@@ -1329,29 +1551,35 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
 
   // ---- 자르기: 끌기·확대(막대·휠·두 손가락) -----------------------------
   const cropBox = $("crop"), cropImg = $("crop-img"), zoom = $("zoom");
-  let box = 0, base = 1, scale = 1, x = 0, y = 0;
+  let bw = 0, bh = 0, base = 1, scale = 1, x = 0, y = 0;
   const pts = new Map();
 
   function startCrop(url) {
-    cropImg.onload = () => { setState("crop"); layout(); };
+    cropImg.onload = () => {
+      if (Math.min(cropImg.naturalWidth, cropImg.naturalHeight) < MIN_SIDE) {
+        setState("choose");
+        return showError("사진이 너무 작아요. 더 크게 찍은 사진을 골라 주세요.");
+      }
+      setState("crop"); layout();
+    };
     cropImg.onerror = () => showError("사진을 열 수 없어요. 다른 사진을 골라 주세요.");
     cropImg.src = url;
   }
   function layout() {
-    box = cropBox.clientWidth;
+    bw = cropBox.clientWidth; bh = cropBox.clientHeight;
     const w = cropImg.naturalWidth, h = cropImg.naturalHeight;
     cropImg.style.width = w + "px"; cropImg.style.height = h + "px";
-    base = Math.max(box / w, box / h);          // 정사각형을 꽉 채우는 최소 배율
+    base = Math.max(bw / w, bh / h);            // 틀을 꽉 채우는 최소 배율
     scale = base; zoom.value = 1;
-    x = (box - w * scale) / 2; y = (box - h * scale) / 2;
+    x = (bw - w * scale) / 2; y = (bh - h * scale) / 2;
     apply();
   }
   function apply() {
     const w = cropImg.naturalWidth * scale, h = cropImg.naturalHeight * scale;
-    x = Math.min(0, Math.max(box - w, x)); y = Math.min(0, Math.max(box - h, y));   // 빈 곳이 안 생기게
+    x = Math.min(0, Math.max(bw - w, x)); y = Math.min(0, Math.max(bh - h, y));   // 빈 곳이 안 생기게
     cropImg.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
   }
-  function zoomTo(z, cx = box / 2, cy = box / 2) {
+  function zoomTo(z, cx = bw / 2, cy = bh / 2) {
     z = Math.min(4, Math.max(1, z));
     const next = base * z;
     x = cx - (cx - x) * next / scale; y = cy - (cy - y) * next / scale;
@@ -1383,14 +1611,16 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
 
   $("crop-cancel").addEventListener("click", () => setState("choose"));
   $("crop-ok").addEventListener("click", () => {
-    const [c, ctx] = square();
-    ctx.drawImage(cropImg, -x / scale, -y / scale, box / scale, box / scale, 0, 0, OUT, OUT);
+    const [c, ctx] = blank();
+    ctx.drawImage(cropImg, -x / scale, -y / scale, bw / scale, bh / scale, 0, 0, OUT_W, OUT_H);
     finish(c);
   });
 
-  // ---- 카메라: 정사각형 화면으로 찍기 -----------------------------------
-  const video = $("video"), flip = $("cam-flip");
-  let stream = null, facing = "environment";
+  // ---- 카메라: 틀 비율 그대로 찍기 (+ 타이머가 있으면 3초·10초) ----------
+  const video = $("video"), flip = $("cam-flip"), shutter = $("shutter");
+  const timerBtn = $("cam-timer"), countEl = $("countdown");
+  const DELAYS = [0, 3, 10];
+  let stream = null, facing = "environment", delay = 0, ticking = null;
 
   async function startCamera() {
     // https가 아니거나(휴대폰에서 IP로 접속 등) 카메라 API가 없으면 휴대폰 기본 카메라 → 자르기
@@ -1408,25 +1638,148 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
     const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
     flip.hidden = cams.length < 2;
   }
-  function stopCamera() { stream?.getTracks().forEach((t) => t.stop()); stream = null; video.srcObject = null; }
+  function stopCount() {
+    clearInterval(ticking); ticking = null;
+    if (countEl) countEl.textContent = "";
+    shutter.classList.remove("counting"); shutter.setAttribute("aria-label", "사진 찍기");
+  }
+  function stopCamera() { stopCount(); stream?.getTracks().forEach((t) => t.stop()); stream = null; video.srcObject = null; }
+
+  function capture() {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return;
+    // 화면에 보이는 가운데 부분(틀 비율)만 사용
+    const sw = vw / vh > RATIO ? vh * RATIO : vw, sh = sw / RATIO;
+    const [c, ctx] = blank();
+    if (facing === "user") { ctx.translate(OUT_W, 0); ctx.scale(-1, 1); }
+    ctx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, OUT_W, OUT_H);
+    stopCamera(); finish(c);
+  }
 
   $("btn-camera").addEventListener("click", startCamera);
   $("cam-cancel").addEventListener("click", () => { stopCamera(); setState("choose"); });
   flip.addEventListener("click", async () => { facing = facing === "environment" ? "user" : "environment"; stopCamera(); await startCamera(); });
-  $("shutter").addEventListener("click", () => {
-    const vw = video.videoWidth, vh = video.videoHeight;
-    if (!vw || !vh) return;
-    const side = Math.min(vw, vh);                 // 가운데 정사각형만 사용
-    const [c, ctx] = square();
-    if (facing === "user") { ctx.translate(OUT, 0); ctx.scale(-1, 1); }
-    ctx.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, OUT, OUT);
-    stopCamera(); finish(c);
+  timerBtn?.addEventListener("click", () => {
+    delay = DELAYS[(DELAYS.indexOf(delay) + 1) % DELAYS.length];
+    timerBtn.querySelector("span").textContent = delay ? `${delay}초` : "끔";
+    timerBtn.setAttribute("aria-pressed", String(delay > 0));
+  });
+  shutter.addEventListener("click", () => {
+    if (ticking) return stopCount();               // 세는 중에 다시 누르면 취소
+    if (!delay || !countEl) return capture();
+    let left = delay;
+    countEl.textContent = left;
+    shutter.classList.add("counting"); shutter.setAttribute("aria-label", "타이머 취소");
+    ticking = setInterval(() => {
+      left -= 1;
+      if (left > 0) { countEl.textContent = left; return; }
+      stopCount(); capture();
+    }, 1000);
   });
   window.addEventListener("pagehide", stopCamera);
 
   setState("choose");
 })();
 </script>
+{% endmacro %}
+{# 전신 사진용: 사람 실루엣 (viewBox 200x300 = 2:3) #}
+{% macro silhouette(cls="") -%}
+<svg class="{{ cls }}" viewBox="0 0 200 300" aria-hidden="true"><g class="sil">
+  <ellipse cx="100" cy="42" rx="15" ry="18"/>
+  <path d="M92 60Q100 64 108 60L109 66 126 71Q133 73 134 81L146 152Q147 159 141 160L137 159 124 98 121 150 118 278H103L100 178 97 278H82L79 150 76 98 63 159 59 160Q53 159 54 152L66 81Q67 73 74 71L91 66Z"/>
+</g><path class="line" d="M0 14H200M0 287H200"/></svg>
+{%- endmacro %}
+
+{# 카메라·자르기·결과 위에 겹치는 가이드: 머리끝·발끝 선 (+ 실루엣) #}
+{% macro body_guide(sil=True) -%}
+<svg class="guide{{ '' if sil else ' no-sil' }}" viewBox="0 0 200 300" aria-hidden="true">
+  {% if sil %}<g class="sil"><ellipse cx="100" cy="42" rx="15" ry="18"/>
+  <path d="M92 60Q100 64 108 60L109 66 126 71Q133 73 134 81L146 152Q147 159 141 160L137 159 124 98 121 150 118 278H103L100 178 97 278H82L79 150 76 98 63 159 59 160Q53 159 54 152L66 81Q67 73 74 71L91 66Z"/></g>{% endif %}
+  <path class="line" d="M0 14H200M0 287H200"/>
+  <text x="12" y="10">머리끝은 이 선 아래</text>
+  <text x="12" y="297">발끝은 이 선 위</text>
+</svg>
+{%- endmacro %}
+"""
+
+GARMENT_NEW_HTML = """{% extends "app_base.html" %}
+{% from "photo_picker.html" import picker_css, picker_js %}
+{% block title %}옷 등록{% endblock %}
+{% block page_head %}
+{{ picker_css() }}
+<style>
+  .reg { max-width: 480px; margin: 0 auto; }
+  .step { margin: 0 0 6px; font-size: .8125rem; font-weight: 600; color: var(--ink-soft); }
+  .reg form { margin-top: 24px; }
+</style>
+{% endblock %}
+{% block content %}
+<div class="reg" id="reg" data-state="choose">
+  <p class="step">1 / 2 · 사진 올리기</p>
+  <h1>옷 등록</h1>
+
+  <form class="stack" method="post" action="/garments/new" enctype="multipart/form-data"
+        novalidate data-loading="사진 분석 중…" id="upload-form">
+    <!-- 실제로 서버에 보내는 1:1 사진 (자르기·촬영 결과를 여기에 넣음) -->
+    <input type="file" name="file" id="file" accept="image/jpeg" hidden>
+    <input type="file" id="pick" accept="image/jpeg,image/png" hidden>
+    <input type="file" id="snap" accept="image/jpeg,image/png" capture="environment" hidden>
+
+    <section class="s-choose">
+      <div class="drop{% if file_error %} invalid{% endif %}" id="drop">
+        <div>
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9.3h16M4 14.7h16M9.3 4v16M14.7 4v16" opacity=".35"/></svg>
+          <strong>옷 사진</strong>
+          <small>1:1 · jpg, png · 10MB 이하</small>
+          <div class="pick-btns">
+            <button type="button" class="btn btn-primary" id="btn-camera">카메라로 찍기</button>
+            <button type="button" class="btn btn-secondary" id="btn-album">앨범에서 고르기</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="s-camera" aria-label="카메라">
+      <div class="frame cam"><video id="video" playsinline muted autoplay></video><div class="thirds"></div></div>
+      <div class="cam-bar">
+        <button type="button" class="btn btn-ghost left" id="cam-cancel">취소</button>
+        <button type="button" class="shutter" id="shutter" aria-label="사진 찍기"></button>
+        <div class="right"><button type="button" class="btn btn-ghost" id="cam-flip" hidden>카메라 전환</button></div>
+      </div>
+    </section>
+
+    <section class="s-crop" aria-label="사진 자르기">
+      <div class="frame crop" id="crop"><img id="crop-img" alt="자를 사진"><div class="thirds"></div></div>
+      <p class="hint">끌어서 옮기고 확대해서 맞추기</p>
+      <div class="zoom-row">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
+        <input type="range" id="zoom" min="1" max="4" step="0.01" value="1" aria-label="확대">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5v14"/></svg>
+      </div>
+      <div class="two">
+        <button type="button" class="btn btn-secondary" id="crop-cancel">다른 사진</button>
+        <button type="button" class="btn btn-primary" id="crop-ok">이대로 자르기</button>
+      </div>
+    </section>
+
+    <section class="s-done" aria-label="올릴 사진">
+      <div class="frame"><img class="result" id="result" alt="올릴 사진 미리보기"></div>
+      <button type="button" class="btn btn-secondary" id="redo">다시 찍기·고르기</button>
+    </section>
+
+    <p class="field-error" id="file-error" role="alert" {% if not file_error %}hidden{% endif %}>{{ file_error or "" }}</p>
+
+    <p class="tips">한 장에 한 벌 · 바닥에 펼치거나 옷걸이에 걸어서 · 단순한 배경</p>
+
+    <div class="actions">
+      <button type="submit" class="btn btn-primary" id="upload-btn">다음</button>
+      <a class="btn btn-ghost" href="/wardrobe">취소</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
+{% block script %}
+{{ picker_js(1080, 1080, "garment.jpg") }}
 {% endblock %}
 """
 
@@ -1436,9 +1789,9 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
 {% block page_head %}
 <style>
   .confirm { max-width: 960px; margin: 0 auto; }
-  .step { margin: 0 0 6px; font-size: .8125rem; font-weight: 600; color: var(--camel); }
+  .step { margin: 0 0 6px; font-size: .8125rem; font-weight: 600; color: var(--ink-soft); }
   .layout { margin-top: 24px; display: grid; gap: 24px; }
-  .photo { display: grid; place-items: center; aspect-ratio: 1; border-radius: 16px; background: #f5f5f4;
+  .photo { display: grid; place-items: center; aspect-ratio: 1; border-radius: 10px; background: #f5f5f5;
            overflow: hidden; }
   .photo img { width: 100%; height: 100%; object-fit: cover; }
   .photo svg { width: 50%; height: 60%; }
@@ -1452,7 +1805,7 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
   .chip input:checked + span { background: var(--ink); border-color: var(--ink); color: #fff; }
   select { height: 48px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--radius);
            background: #fff; font: inherit; font-size: 1rem; color: var(--ink); }
-  select:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgb(28 25 23 / .1); }
+  select:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgb(23 23 23 / .1); }
   .swatches { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
   .swatch { position: relative; }
   .swatch input { position: absolute; opacity: 0; pointer-events: none; }
@@ -1487,16 +1840,16 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
       <div class="photo">{{ garment_art(g) }}</div>
       {% if mode == "edit" %}
       {% elif USE_MOCK %}
-      <p class="auto soft">Mock 모드라 자동 분석 대신 기본값이 들어가 있어요. 직접 골라 주세요.</p>
+      <p class="auto soft">Mock 모드: 자동 분석 없이 기본값</p>
       {% else %}
-      <p class="auto soft">사진을 보고 자동으로 채웠어요. 틀린 부분만 고쳐 주세요.</p>
+      <p class="auto soft">틀린 부분만 고쳐 주세요.</p>
       {% endif %}
     </div>
 
     <div>
       <form class="stack" method="post" action="/garments/{{ g.garment_id }}/{{ 'edit' if mode == 'edit' else 'confirm' }}" novalidate data-loading="저장 중…">
         <fieldset class="field">
-          <legend>종류 <small>필수</small></legend>
+          <legend>종류</legend>
           <div class="chips">
             {% for c in CATEGORY_ORDER %}
             <label class="chip"><input type="radio" name="category" value="{{ c }}" {% if form.category == c %}checked{% endif %}><span>{{ c | ko("category") }}</span></label>
@@ -1520,7 +1873,7 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
           {% if errors.subcategory %}<p class="field-error">{{ errors.subcategory }}</p>{% endif %}
         </div>
 
-        {{ field("name", "이름 (선택)", value=form.name, error=errors.name, maxlength=30,
+        {{ field("name", "이름", value=form.name, error=errors.name, maxlength=30,
                  placeholder="예: 유니클로 네이비 니트", hint="비워 두면 세부 종류(니트 등)로 보여요.",
                  autofocus=errors.name) }}
 
@@ -1571,7 +1924,7 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
           {% if errors.thermal_level %}<p class="field-error">{{ errors.thermal_level }}</p>{% endif %}
         </fieldset>
 
-        {{ field("location", "보관 위치 (선택)", value=form.location, error=errors.location, maxlength=30,
+        {{ field("location", "보관 위치", value=form.location, error=errors.location, maxlength=30,
                  placeholder="예: 안방 옷장 2칸, 서랍, 본가", suggestions=locations,
                  hint="이전에 쓴 위치는 입력할 때 추천돼요." if locations else None, autofocus=errors.location) }}
 
@@ -1630,30 +1983,30 @@ GARMENT_DETAIL_HTML = """{% extends "app_base.html" %}
   .back { display: inline-block; margin-bottom: 16px; color: var(--ink-soft); text-decoration: none; font-size: .9375rem; }
   .back:hover { color: var(--ink); }
   .layout { display: grid; gap: 24px; }
-  .photo { position: relative; display: grid; place-items: center; aspect-ratio: 1; border-radius: 16px;
-           background: #f5f5f4; overflow: hidden; }
+  .photo { position: relative; display: grid; place-items: center; aspect-ratio: 1; border-radius: 10px;
+           background: #f5f5f5; overflow: hidden; }
   .photo img { width: 100%; height: 100%; object-fit: cover; }
   .photo svg { width: 60%; height: 60%; }
-  .photo .badge { position: absolute; top: 12px; left: 12px; padding: 4px 10px; border-radius: 999px;
+  .photo .badge { position: absolute; top: 12px; left: 12px; padding: 4px 10px; border-radius: 6px;
                   font-size: .8125rem; font-weight: 600; }
-  .badge.laundry { background: var(--camel-soft); color: #8a5a2e; }
-  .badge.inactive { background: #e7e5e4; color: var(--ink-soft); }
+  .badge.laundry { background: var(--ink); color: #fff; }
+  .badge.inactive { background: #e5e5e5; color: var(--ink-soft); }
   .kicker { margin: 0 0 4px; font-size: .875rem; color: var(--ink-soft); }
   .props { margin: 20px 0 0; display: grid; grid-template-columns: 72px 1fr; gap: 12px 16px; font-size: .9375rem; }
   .props dt { color: var(--ink-soft); }
   .props dd { margin: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .dot { width: 14px; height: 14px; border-radius: 50%; border: 1px solid rgb(0 0 0 / .15); }
   .dot.multi { background: conic-gradient(#c0392b, #f2c94c, #2f7d4f, #2f5fb3, #c0392b); }
-  .tag { padding: 2px 10px; border-radius: 999px; background: #f5f5f4; font-size: .8125rem; }
+  .tag { padding: 2px 10px; border-radius: 6px; background: #f5f5f5; font-size: .8125rem; }
   .muted { color: var(--muted); }
   .block { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
   .block h2 { margin: 0 0 12px; font-size: 1rem; }
-  .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; border-radius: 14px; background: #f0eeec; }
+  .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; border-radius: 10px; background: #f0eeec; }
   .seg button { height: 40px; border: 0; border-radius: 10px; background: none; font: inherit; font-size: .9375rem;
                 color: var(--ink-soft); cursor: pointer; }
   .seg button:hover { color: var(--ink); }
   .seg button[aria-pressed="true"] { background: #fff; color: var(--ink); font-weight: 600;
-                                     box-shadow: 0 1px 3px rgb(28 25 23 / .12); cursor: default; }
+                                     box-shadow: 0 1px 3px rgb(23 23 23 / .12); cursor: default; }
   .seg button:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
   .help { margin: 8px 0 0; font-size: .8125rem; color: var(--ink-soft); }
   .actions { display: flex; flex-direction: column; gap: 8px; }
@@ -1708,7 +2061,6 @@ GARMENT_DETAIL_HTML = """{% extends "app_base.html" %}
                   {% if g.status == s %}type="button"{% endif %}>{{ s | ko("status") }}</button>
           {% endfor %}
         </form>
-        <p class="help">세탁 중이거나 추천 제외로 둔 옷은 코디 추천에 나오지 않아요.</p>
       </section>
 
       <section class="block actions">
@@ -1716,7 +2068,7 @@ GARMENT_DETAIL_HTML = """{% extends "app_base.html" %}
         <details class="danger" ontoggle="if (this.open) this.querySelector('.confirm-box').scrollIntoView({ block: 'nearest', behavior: 'smooth' })">
           <summary class="btn btn-ghost">삭제</summary>
           <div class="confirm-box" role="alertdialog" aria-label="삭제 확인">
-            <p>이 옷을 옷장에서 지울까요? 사진도 함께 지워지고 되돌릴 수 없어요.</p>
+            <p>이 옷을 삭제할까요? 되돌릴 수 없어요.</p>
             <div class="two">
               <button type="button" class="btn btn-secondary" onclick="this.closest('details').open = false">취소</button>
               <form method="post" action="/garments/{{ g.garment_id }}/delete">
@@ -1738,7 +2090,9 @@ register_templates(
         "login.html": LOGIN_HTML,
         "signup.html": SIGNUP_HTML,
         "profile.html": PROFILE_HTML,
+        "body_photo.html": BODY_PHOTO_HTML,
         "wardrobe.html": WARDROBE_HTML,
+        "photo_picker.html": PHOTO_PICKER_HTML,
         "garment_new.html": GARMENT_NEW_HTML,
         "garment_confirm.html": GARMENT_CONFIRM_HTML,
         "garment_detail.html": GARMENT_DETAIL_HTML,

@@ -12,8 +12,16 @@ POST /auth/signup  JSON {"email", "password"}   ← 가입하면 바로 로그�
 
 GET  /users/me/profile                (Authorization: Bearer)
   200 {"height_cm": 170.0, "weight_kg": 60.5, "age": 24, "gender": "female"}  ← 값이 없으면 null
-PUT  /users/me/profile  JSON 위와 같은 형식
+PUT  /users/me/profile  JSON 위와 같은 형식 (body_photo_updated_at은 보내지 않음)
   200 저장된 프로필
+  ※ GET 응답에 "body_photo_updated_at": "2026-11-07T12:00:00Z" | null 도 넣어 주세요 (전신 사진 유무·캐시용)
+
+전신 사진 (FASHN VTON v1.5 착샷의 사람 사진) — 프론트가 항상 세로 2:3, 1080x1620 JPEG로 만들어 보냄
+PUT    /users/me/body-photo   multipart "file" (jpg·png, 10MB 이하)
+  200 {"body_photo_updated_at": "..."}   400/413/415 {"detail", "code"}
+  (선택) 머리~발끝이 다 안 보이면 422 {"detail": "머리부터 발끝까지 나오게 찍어 주세요.", "code": "BODY_NOT_FULL"}
+GET    /users/me/body-photo   → 이미지 파일 / 404 BODY_PHOTO_NOT_FOUND
+DELETE /users/me/body-photo   → 204
 
 TODO(C 확인): gender 값("female"/"male"/"other"/null)은 contracts.py에 아직 없음
 """
@@ -21,9 +29,10 @@ TODO(C 확인): gender 값("female"/"male"/"other"/null)은 contracts.py에 아�
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 
-from . import USE_MOCK, ApiError, request
+from . import USE_MOCK, ApiError, request, request_bytes
 
 # Mock 모드 데모 계정 (화면 확인용, 실제 백엔드와 무관)
 DEMO_EMAIL = "demo@fitjang.com"
@@ -45,6 +54,7 @@ class Profile:
     weight_kg: float | None = None
     age: int | None = None
     gender: str | None = None
+    body_photo_updated_at: str | None = None  # 읽기 전용: 전신 사진이 있으면 올린 시각
 
     def to_json(self) -> dict:
         return {
@@ -61,6 +71,7 @@ class Profile:
             weight_kg=data.get("weight_kg"),
             age=data.get("age"),
             gender=data.get("gender"),
+            body_photo_updated_at=data.get("body_photo_updated_at"),
         )
 
 
@@ -86,7 +97,12 @@ async def signup(email: str, password: str) -> Token:
 
 async def get_profile(token: str) -> Profile:
     if USE_MOCK:
-        return _MOCK_PROFILES.get(mock_email(token), Profile())
+        email = mock_email(token)
+        photo = _MOCK_BODY_PHOTOS.get(email)
+        return replace(
+            _MOCK_PROFILES.get(email, Profile()),
+            body_photo_updated_at=photo[2] if photo else None,
+        )
     return Profile.from_json(await request("GET", "/users/me/profile", token=token))
 
 
@@ -98,6 +114,38 @@ async def save_profile(token: str, profile: Profile) -> Profile:
     return Profile.from_json(
         await request("PUT", "/users/me/profile", token=token, json=profile.to_json())
     )
+
+
+# ---- 전신 사진 (착샷용) ------------------------------------------------------
+async def upload_body_photo(
+    token: str, filename: str, content: bytes, content_type: str
+) -> str | None:
+    """전신 사진 저장 → 올린 시각."""
+    if USE_MOCK:
+        await asyncio.sleep(0.4)
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        _MOCK_BODY_PHOTOS[mock_email(token)] = (content, content_type, now)
+        return now
+    files = {"file": (filename, content, content_type)}
+    data = await request("PUT", "/users/me/body-photo", token=token, files=files)
+    return data.get("body_photo_updated_at")
+
+
+async def fetch_body_photo(token: str) -> tuple[bytes, str]:
+    """전신 사진 (내용, content-type). 없으면 ApiError(404)."""
+    if USE_MOCK:
+        photo = _MOCK_BODY_PHOTOS.get(mock_email(token))
+        if not photo:
+            raise ApiError(404, "전신 사진이 없어요.", "BODY_PHOTO_NOT_FOUND")
+        return photo[0], photo[1]
+    return await request_bytes("GET", "/users/me/body-photo", token=token)
+
+
+async def delete_body_photo(token: str) -> None:
+    if USE_MOCK:
+        _MOCK_BODY_PHOTOS.pop(mock_email(token), None)
+        return
+    await request("DELETE", "/users/me/body-photo", token=token)
 
 
 def _token(data: dict) -> Token:
@@ -113,6 +161,9 @@ _MOCK_USERS: dict[str, str] = {DEMO_EMAIL: DEMO_PASSWORD}  # email → password
 _MOCK_PROFILES: dict[str, Profile] = {
     DEMO_EMAIL: Profile(height_cm=165, age=24, gender="female")
 }
+_MOCK_BODY_PHOTOS: dict[
+    str, tuple[bytes, str, str]
+] = {}  # email → (사진, 형식, 올린 시각)
 _DAY = 60 * 60 * 24
 
 

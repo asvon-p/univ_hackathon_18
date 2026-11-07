@@ -154,7 +154,7 @@ def ko(value, kind: str) -> str:
 
 
 def color_hex(color: str | None) -> str:
-    return COLOR_HEX.get(color or "", "#d6d3d1")
+    return COLOR_HEX.get(color or "", "#d4d4d4")
 
 
 def garment_name(g) -> str:
@@ -214,15 +214,15 @@ BASE_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#1c1917">
-  <title>{% block title %}핏장{% endblock %} — 내 옷장 코디</title>
+  <meta name="theme-color" content="#171717">
+  <title>{% block title %}핏장{% endblock %} · 핏장</title>
   <link rel="icon" href="data:image/svg+xml,{{ LOGO_SVG | urlencode }}">
   <style>
     :root {
-      --ink: #1c1917; --ink-soft: #57534e; --muted: #a8a29e; --paper: #fafaf9; --line: #e7e5e4;
-      --camel: #b07d4f; --camel-soft: #f3e9df; --danger: #b42318; --danger-soft: #fef3f2;
+      --ink: #171717; --ink-soft: #525252; --muted: #a3a3a3; --paper: #fafafa; --line: #e5e5e5;
+      --danger: #b42318; --danger-soft: #fef3f2;
       --ok: #067647; --ok-soft: #ecfdf3;
-      --radius: 12px;
+      --radius: 8px;
       font-family: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", system-ui, sans-serif;
     }
     * { box-sizing: border-box; }
@@ -246,7 +246,7 @@ BASE_HTML = """<!doctype html>
     .field label, .field legend { font-size: .875rem; font-weight: 500; }
     .input-box { display: flex; align-items: center; background: #fff; border: 1px solid var(--line);
                  border-radius: var(--radius); transition: border-color .15s, box-shadow .15s; }
-    .input-box:focus-within { border-color: var(--ink); box-shadow: 0 0 0 3px rgb(28 25 23 / .1); }
+    .input-box:focus-within { border-color: var(--ink); box-shadow: 0 0 0 3px rgb(23 23 23 / .1); }
     .input-box.invalid { border-color: var(--danger); }
     .input-box.invalid:focus-within { box-shadow: 0 0 0 3px rgb(180 35 24 / .15); }
     .input-box input { flex: 1; min-width: 0; height: 48px; padding: 0 16px; border: 0; background: transparent;
@@ -260,7 +260,7 @@ BASE_HTML = """<!doctype html>
     /* 비밀번호 보기 버튼 (눈 아이콘) */
     .toggle { display: grid; place-items: center; width: 40px; height: 40px; margin-right: 4px; padding: 0;
               border: 0; border-radius: 8px; background: none; color: var(--muted); cursor: pointer; }
-    .toggle:hover { background: #f5f5f4; color: var(--ink); }
+    .toggle:hover { background: #f5f5f5; color: var(--ink); }
     .toggle svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2;
                   stroke-linecap: round; stroke-linejoin: round; }
     .toggle .icon-eye { display: none; }
@@ -272,7 +272,7 @@ BASE_HTML = """<!doctype html>
     .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
     .chip input { position: absolute; opacity: 0; pointer-events: none; }
     .chip span { display: inline-flex; align-items: center; height: 40px; padding: 0 16px; border: 1px solid var(--line);
-                 border-radius: 999px; background: #fff; font-size: .9375rem; cursor: pointer; transition: all .15s; }
+                 border-radius: 6px; background: #fff; font-size: .9375rem; cursor: pointer; transition: all .15s; }
     .chip span:hover { border-color: var(--ink-soft); }
     .chip input:checked + span { background: var(--ink); border-color: var(--ink); color: #fff; }
     .chip input:focus-visible + span { outline: 2px solid var(--ink); outline-offset: 2px; }
@@ -282,11 +282,11 @@ BASE_HTML = """<!doctype html>
            padding: 0 20px; border-radius: var(--radius); font: inherit; font-weight: 600; font-size: 1rem;
            cursor: pointer; border: 1px solid transparent; transition: background .15s; text-decoration: none; }
     .btn-primary { background: var(--ink); color: #fff; }
-    .btn-primary:hover { background: #292524; }
+    .btn-primary:hover { background: #262626; }
     .btn-secondary { background: #fff; color: var(--ink); border-color: var(--line); }
-    .btn-secondary:hover { background: #f5f5f4; }
+    .btn-secondary:hover { background: #f5f5f5; }
     .btn-ghost { background: none; color: var(--ink-soft); }
-    .btn-ghost:hover { color: var(--ink); background: #f5f5f4; }
+    .btn-ghost:hover { color: var(--ink); background: #f5f5f5; }
     .btn:focus-visible, .toggle:focus-visible, .link-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
     .btn[disabled] { background: var(--muted); color: #fff; cursor: not-allowed; }
     .spinner { width: 16px; height: 16px; border: 2px solid currentColor; border-right-color: transparent;
@@ -295,6 +295,12 @@ BASE_HTML = """<!doctype html>
     .link-btn { padding: 0; border: 0; background: none; font: inherit; font-weight: 600;
                 text-decoration: underline; text-underline-offset: 4px; cursor: pointer; color: var(--ink); }
 
+    /* 사진 없는 옷: 그림 대신 색 동그라미만 */
+    .noimg { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+             width: 100%; height: 100%; container-type: inline-size; }
+    .noimg i { width: min(28%, 44px); aspect-ratio: 1; border-radius: 50%; border: 1px solid rgb(0 0 0 / .12); }
+    .noimg .cap { font-size: .75rem; color: var(--muted); }
+    @container (max-width: 140px) { .noimg .cap { display: none; } }
     .alert { padding: 12px 16px; border-radius: var(--radius); background: var(--danger-soft);
              color: var(--danger); font-size: .875rem; }
     .notice { padding: 12px 16px; border-radius: var(--radius); background: var(--ok-soft);
@@ -369,49 +375,31 @@ MACROS_HTML = """{% macro brand(inverted=False) -%}
 </div>
 {%- endmacro %}
 
-{# 옷 그림: 누끼 이미지 주소가 있으면 사진, 없으면 종류·색으로 그린 그림 #}
+{# 옷 사진: 있으면 사진, 없으면 옷 색 동그라미만 (2026-11-08: 그림 옷 아이콘은 AI 티가 나서 없앰) #}
 {% macro garment_art(g) -%}
 {% set url = image_url(g) %}
 {% if url %}<img src="{{ url }}" alt="" loading="lazy">{% else %}
-<svg viewBox="0 0 100 100" aria-hidden="true">
-  {% if g.color == "multi" %}<defs><linearGradient id="multi-{{ g.garment_id }}" x1="0" y1="0" x2="1" y2="1">
-    <stop offset="0" stop-color="#c0392b"/><stop offset=".5" stop-color="#f2c94c"/><stop offset="1" stop-color="#2f5fb3"/>
-  </linearGradient></defs>{% endif %}
-  <g fill="{{ 'url(#multi-' ~ g.garment_id ~ ')' if g.color == 'multi' else color_hex(g.color) }}"
-     stroke="rgba(0,0,0,.28)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round">
-  {% if g.category == "top" and (g.subcategory or "") in ("sweater", "knit", "hoodie", "sweatshirt", "cardigan", "shirt", "blouse") %}
-    <path d="M36 16 50 22 64 16 80 24 90 72 80 74 68 40V86H32V40L20 74 10 72 20 24Z"/><path d="M42 18.5Q50 28 58 18.5" fill="none"/>
-  {% elif g.category == "top" %}
-    <path d="M36 16 50 22 64 16 86 30 78 46 68 41V86H32V41L22 46 14 30Z"/><path d="M42 18.5Q50 28 58 18.5" fill="none"/>
-  {% elif g.category == "bottom" %}
-    <path d="M30 12H70L74 88H56L50 38 44 88H26Z"/><path d="M30 20H70" fill="none"/>
-  {% elif g.category == "outerwear" %}
-    <path d="M36 10 50 18 64 10 80 18 90 76 80 78 70 38V92H30V38L20 78 10 76 20 18Z"/><path d="M50 18V92" fill="none"/>
-  {% else %}
-    <path d="M10 64C10 54 16 48 24 48H38C44 48 48 54 54 56L80 62C88 64 90 68 90 74V78H10Z"/><path d="M10 72H90" fill="none"/>
-  {% endif %}
-  </g>
-</svg>{% endif %}
+<span class="noimg" aria-hidden="true"><i style="background:{{ 'conic-gradient(#c0392b, #f2c94c, #2f5fb3, #c0392b)' if g.color == 'multi' else color_hex(g.color) }}"></i><span class="cap">사진 없음</span></span>{% endif %}
 {%- endmacro %}"""
 
 APP_BASE_HTML = """{% extends "base.html" %}
 {% from "macros.html" import brand %}
 {% block head %}
 <style>
-  .topbar { position: sticky; top: 0; z-index: 10; background: rgb(250 250 249 / .92);
+  .topbar { position: sticky; top: 0; z-index: 10; background: rgb(250 250 250 / .92);
             backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
   .topbar-inner { max-width: 1120px; margin: 0 auto; height: 64px; padding: 0 16px;
                   display: flex; align-items: center; gap: 24px; }
   .topbar-inner > a { text-decoration: none; }
   .topnav { display: none; gap: 4px; margin-left: 8px; }
-  .topnav a { padding: 8px 14px; border-radius: 999px; text-decoration: none; color: var(--ink-soft); font-weight: 500; }
-  .topnav a:hover { color: var(--ink); background: #f5f5f4; }
-  .topnav a[aria-current="page"] { color: var(--ink); background: #ece9e6; font-weight: 600; }
+  .topnav a { padding: 8px 14px; border-radius: 6px; text-decoration: none; color: var(--ink-soft); font-weight: 500; }
+  .topnav a:hover { color: var(--ink); background: #f5f5f5; }
+  .topnav a[aria-current="page"] { color: var(--ink); background: #eeeeee; font-weight: 600; }
   .logout { margin-left: auto; }
   .logout .btn { height: 36px; padding: 0 12px; font-size: .875rem; font-weight: 500; }
   .content { max-width: 1120px; margin: 0 auto; padding: 24px 16px 104px; }
   .content.bare { max-width: 480px; padding-top: 40px; padding-bottom: 40px; }
-  .tabbar { position: fixed; inset: auto 0 0 0; z-index: 10; display: grid; grid-template-columns: repeat(3, 1fr);
+  .tabbar { position: fixed; inset: auto 0 0 0; z-index: 10; display: grid; grid-template-columns: repeat(4, 1fr);
             height: calc(64px + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom);
             background: #fff; border-top: 1px solid var(--line); }
   .tabbar a { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
@@ -429,11 +417,11 @@ APP_BASE_HTML = """{% extends "base.html" %}
 {% block page_head %}{% endblock %}
 {% endblock %}
 {% block body %}
-{% set menu = [("wardrobe", "/wardrobe", "옷장"), ("recommend", "/recommend", "코디 추천"), ("profile", "/profile", "프로필")] %}
+{% set menu = [("home", "/", "홈"), ("wardrobe", "/wardrobe", "옷장"), ("recommend", "/recommend", "코디 추천"), ("profile", "/profile", "프로필")] %}
 {% if not bare %}
 <header class="topbar">
   <div class="topbar-inner">
-    <a href="/wardrobe" aria-label="핏장 홈">{{ brand() }}</a>
+    <a href="/" aria-label="핏장 홈">{{ brand() }}</a>
     <nav class="topnav" aria-label="주 메뉴">
       {% for key, href, label in menu %}
       <a href="{{ href }}" {% if active == key %}aria-current="page"{% endif %}>{{ label }}</a>
@@ -453,8 +441,9 @@ APP_BASE_HTML = """{% extends "base.html" %}
 <nav class="tabbar" aria-label="주 메뉴">
   {% for key, href, label in menu %}
   <a href="{{ href }}" {% if active == key %}aria-current="page"{% endif %}>
-    {% if key == "wardrobe" %}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5a2 2 0 1 1 2 2v1.5"/><path d="M12 8.5 3.4 15.2a1 1 0 0 0 .6 1.8h16a1 1 0 0 0 .6-1.8z"/></svg>
-    {% elif key == "recommend" %}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3l1.8 5.2L18 10l-5.2 1.8L11 17l-1.8-5.2L4 10l5.2-1.8z"/><path d="M18.5 15l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/></svg>
+    {% if key == "home" %}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 10.5 12 3.5l8.5 7"/><path d="M5.5 9v11h13V9"/></svg>
+    {% elif key == "wardrobe" %}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5a2 2 0 1 1 2 2v1.5"/><path d="M12 8.5 3.4 15.2a1 1 0 0 0 .6 1.8h16a1 1 0 0 0 .6-1.8z"/></svg>
+    {% elif key == "recommend" %}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3.5 4 6 2.5 10.5 5.5 12V20.5h13V12l3-1.5L20 6l-5-2.5c-.5 1.5-1.5 2.3-3 2.3s-2.5-.8-3-2.3Z"/></svg>
     {% else %}<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>{% endif %}
     {{ label }}
   </a>
@@ -478,8 +467,8 @@ LOGO_PATH_SVG = (
     '<path d="M8 3l4 2.4L16 3l4 3.2-2.4 3.2-1.6-1.2V21H8V8.2L6.4 9.4 4 6.2z"/></svg>'
 )
 LOGO_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#1c1917"/>'
-    '<path d="M22 14l10 6 10-6 10 8-6 8-4-3v23H22V27l-4 3-6-8z" fill="#fafaf9"/></svg>'
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#171717"/>'
+    '<path d="M22 14l10 6 10-6 10 8-6 8-4-3v23H22V27l-4 3-6-8z" fill="#fafafa"/></svg>'
 )
 
 _TEMPLATES: dict[str, str] = {

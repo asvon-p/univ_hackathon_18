@@ -9,6 +9,9 @@
 
 from __future__ import annotations
 
+import re
+import time
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Form, Query, Request
@@ -17,6 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from shared.contracts import FeedbackEvent, UserContext
 
 from .common import (
+    CATEGORY_ORDER,
     LABELS,
     TOKEN_COOKIE,
     go_login,
@@ -26,13 +30,15 @@ from .common import (
     render,
 )
 from .connect import ApiError
+from .connect import auth_profile as auth
 from .connect import garment_storage as closet
 from .connect import recommendation as rec
 from .connect import weather as weather_api
 
 router = APIRouter()
 
-# DECISIONS 기온 구간: ≤2 / 2~10 / 10~20 / ≥20°C → 구간마다 대표 기온으로 보냄
+# DECISIONS 기온 구간: ≤2 / 2~10 / 10~20 / ≥20°C
+# 화면은 기온 숫자만 받음 (2026-11-07 시아: 구간 버튼 없앰). 아래는 예전 ?band= 주소용
 TEMP_BANDS = [
     ("freezing", "한파", "2°C 이하", 0),
     ("cold", "추움", "2~10°C", 6),
@@ -40,7 +46,30 @@ TEMP_BANDS = [
     ("hot", "더움", "20°C 이상", 25),
 ]
 BAND_TEMP = {key: temp for key, _, _, temp in TEMP_BANDS}
-MAX_PREF_STYLES = 3
+MAX_PREF_STYLES = 3  # 버튼으로 고르는 스타일 최대 개수
+# 버튼으로 보여줄 대표 스타일 (2026-11-07 시아: 나머지는 글로 입력)
+QUICK_STYLES = ["casual", "minimal", "street", "formal"]
+MAX_STYLE_TEXT = 40  # 직접 입력 글자 수
+# 직접 입력한 말 → 스타일 코드 (모르는 말은 그대로 보냄. preferred_styles는 list[str])
+STYLE_WORDS = {
+    **{code: code for code in LABELS["style"]},
+    **{label: code for code, label in LABELS["style"].items()},
+    "스트리트": "street",
+    "스포츠": "sporty",
+    "아메리칸캐주얼": "amekaji",
+}
+
+
+def parse_style_text(text: str) -> list[str]:
+    """ "빈티지, 꾸안꾸" → ["vintage", "꾸안꾸"] (쉼표로 나눔, 아는 말은 코드로)."""
+    out = []
+    for word in re.split(r"[,，、/]", text[:MAX_STYLE_TEXT]):
+        word = " ".join(word.split())
+        if word:
+            out.append(STYLE_WORDS.get(word.lower().replace(" ", ""), word[:20]))
+    return out[:3]
+
+
 # 추천 코디에 보여줄 종류 — 신발은 추천에서 뺌 (2026-11-07 D 결정, 옷장 등록은 그대로)
 SLOTS = [("outerwear", "아우터"), ("top", "상의"), ("bottom", "하의")]
 NEEDED = ["top", "bottom"]  # 코디를 만들려면 꼭 있어야 하는 종류
@@ -70,6 +99,105 @@ async def wearable_garments(token: str):
     usable = [g for g in garments if g.status == "available"]
     counts = {c: sum(1 for g in usable if g.category == c) for c, _ in SLOTS}
     return garments, usable, counts
+
+
+# ---- 0) 홈: 오늘 날짜·기온 + 오늘의 코디 + 내 옷장 요약 --------------------------
+LOC_COOKIE = (
+    "fitjang_loc"  # 브라우저 위치 "37.57,126.98"(소수 둘째 자리까지) 또는 "none"(거부)
+)
+WEEKDAYS = "월화수목금토일"
+_HOME_CACHE: dict[
+    tuple, tuple[float, object]
+] = {}  # 같은 조건이면 오늘의 코디를 다시 안 부름
+HOME_CACHE_SEC = 60 * 60
+
+
+def home_location(request: Request) -> tuple[float, float, bool]:
+    """(위도, 경도, 서울 기준인지). 위치 쿠키가 없거나 이상하면 서울."""
+    raw = request.cookies.get(LOC_COOKIE, "")
+    try:
+        lat, lon = (float(x) for x in raw.split(","))
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            return round(lat, 2), round(lon, 2), False
+    except ValueError:
+        pass
+    return round(weather_api.SEOUL[0], 2), round(weather_api.SEOUL[1], 2), True
+
+
+async def todays_outfit(token: str, temperature: float, usable) -> object | None:
+    """오늘의 코디 1개 (추천 결과의 첫 번째). 한 시간 동안은 같은 결과를 보여줌."""
+    key = (token, round(temperature), tuple(sorted(g.garment_id for g in usable)))
+    hit = _HOME_CACHE.get(key)
+    if hit and time.monotonic() - hit[0] < HOME_CACHE_SEC:
+        return hit[1]
+    result = await rec.recommend(
+        token,
+        UserContext(
+            user_id="me", temperature_c=temperature
+        ),  # TODO(C): 토큰에서 사용자
+    )
+    outfit = result.outfits[0] if result.outfits else None
+    if len(_HOME_CACHE) > 200:
+        _HOME_CACHE.clear()
+    _HOME_CACHE[key] = (time.monotonic(), outfit)
+    return outfit
+
+
+@router.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    token = request.cookies.get(TOKEN_COOKIE)
+    if not token:
+        return go_login(request)
+    now = datetime.now(UTC) + timedelta(hours=9)  # 한국 시간
+    lat, lon, is_fallback = home_location(request)
+    try:
+        weather = await weather_api.get_weather(token, lat, lon)
+    except ApiError as e:
+        if e.status == 401:
+            return logged_out()
+        weather = None
+    try:
+        garments, usable, counts = await wearable_garments(token)
+    except ApiError as e:
+        if e.status == 401:
+            return logged_out()
+        garments, usable, counts = [], [], {c: 0 for c, _ in SLOTS}
+    missing = [c for c in NEEDED if counts[c] == 0]
+    outfit, outfit_error = None, None
+    if weather and not missing:
+        try:
+            outfit = await todays_outfit(token, weather.temperature_c, usable)
+        except ApiError as e:
+            if e.status == 401:
+                return logged_out()
+            outfit_error = e.message
+    try:
+        profile = await auth.get_profile(token)  # 착샷(전신 사진 유무)용
+    except ApiError:
+        profile = None
+    place = (weather.location_name if weather else None) or (
+        "서울" if is_fallback else "현재 위치"
+    )
+    return render(
+        request,
+        "home.html",
+        active="home",
+        date_label=f"{now.month}월 {now.day}일 {WEEKDAYS[now.weekday()]}요일",
+        weather=weather,
+        place=place,
+        is_fallback=is_fallback,
+        ask_location=LOC_COOKIE not in request.cookies,
+        outfit=outfit,
+        outfit_error=outfit_error,
+        missing=missing,
+        by_id={g.garment_id: g for g in garments},
+        profile=profile,
+        total=len(garments),
+        cat_counts={
+            c: sum(1 for g in garments if g.category == c) for c in CATEGORY_ORDER
+        },
+        laundry=sum(1 for g in garments if g.status == "laundry"),
+    )
 
 
 # ---- 1) 조건 고르기 ------------------------------------------------------------
@@ -102,7 +230,7 @@ async def recommend_page(request: Request):
         usable=usable,
         counts=counts,
         missing=missing,
-        form={"band": "mild", "styles": [], "exclude": []},
+        form={"temp": "", "styles": [], "style_text": "", "exclude": []},
         autofill=True,  # 처음 열 때만 오늘 기온 자동 입력
     )
 
@@ -138,7 +266,10 @@ async def recommend_result(
     temp: str = "",
     occasion: str = "",
     styles: Annotated[list[str] | None, Query()] = None,
-    exclude: Annotated[list[str] | None, Query()] = None,
+    style_text: str = "",
+    exclude: Annotated[
+        list[str] | None, Query()
+    ] = None,  # 화면에서는 없앰 (예전 주소용)
 ):
     token = request.cookies.get(TOKEN_COOKIE)
     if not token:
@@ -149,6 +280,7 @@ async def recommend_result(
         "temp": temp.strip(),
         "occasion": occasion,
         "styles": styles,
+        "style_text": style_text.strip()[:MAX_STYLE_TEXT],
         "exclude": exclude,
     }
 
@@ -162,14 +294,17 @@ async def recommend_result(
                 errors["temp"] = "기온은 -30~45°C 사이로 입력해 주세요."
         except ValueError:
             errors["temp"] = "기온은 숫자로 입력해 주세요."
-    elif band in BAND_TEMP:
+    elif band in BAND_TEMP:  # 예전 주소
         temperature = BAND_TEMP[band]
     else:
-        errors["temp"] = "오늘 기온을 골라 주세요."
+        errors["temp"] = "오늘 기온을 입력해 주세요."
     if occasion and occasion not in LABELS["occasion"]:
         errors["occasion"] = "상황을 다시 골라 주세요."
     if any(s not in LABELS["style"] for s in styles) or len(styles) > MAX_PREF_STYLES:
         errors["styles"] = f"스타일은 {MAX_PREF_STYLES}개까지 고를 수 있어요."
+    # 버튼 + 직접 입력 (겹치는 건 한 번만)
+    all_styles = list(dict.fromkeys(styles + parse_style_text(form["style_text"])))
+    form["all_styles"] = all_styles
 
     try:
         garments, usable, counts = await wearable_garments(token)
@@ -190,7 +325,7 @@ async def recommend_result(
             user_id="me",  # TODO(C): 로그인(JWT) 후에는 백엔드가 토큰에서 사용자 확인
             temperature_c=temperature,
             occasion=occasion or None,
-            preferred_styles=styles,
+            preferred_styles=all_styles,
             excluded_items=exclude,
         )
         result = await rec.recommend(token, context)
@@ -208,6 +343,10 @@ async def recommend_result(
         )
 
     by_id = {g.garment_id: g for g in garments}
+    try:
+        profile = await auth.get_profile(token)  # 착샷(전신 사진 유무)용 (없어도 됨)
+    except ApiError:
+        profile = None
     missing = [
         c
         for c in NEEDED
@@ -221,9 +360,9 @@ async def recommend_result(
         result=result,
         by_id=by_id,
         temperature=temperature,
-        band=temp_band(temperature),
         form=form,
         missing=missing,
+        profile=profile,
     )
 
 
@@ -276,93 +415,54 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
   .rec form { margin-top: 24px; }
   legend { display: flex; gap: 6px; align-items: baseline; }
   legend small { color: var(--muted); font-weight: 400; }
-  .bands { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 8px; }
-  .band input { position: absolute; opacity: 0; pointer-events: none; }
-  .band span { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-               height: 64px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff;
-               cursor: pointer; transition: all .15s; }
-  .band b { font-size: .9375rem; }
-  .band small { font-size: .75rem; color: var(--ink-soft); }
-  .band input:checked + span { background: var(--ink); border-color: var(--ink); color: #fff; }
-  .band input:checked + span small { color: #d6d3d1; }
-  .band input:focus-visible + span { outline: 2px solid var(--ink); outline-offset: 2px; }
-  .weather { margin-top: 6px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 10px 12px;
-             border-radius: var(--radius); background: var(--camel-soft); font-size: .875rem; }
-  .weather[hidden] { display: none; }
-  .weather svg { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: var(--camel); stroke-width: 2; stroke-linecap: round; }
-  .weather .link-btn { font-size: .8125rem; }
-  .exact { margin-top: 10px; display: flex; align-items: center; gap: 8px; font-size: .875rem; color: var(--ink-soft); }
-  .exact .input-box { width: 120px; }
-  .exact .input-box input { height: 40px; }
+  .temp-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .temp-row .input-box { width: 132px; }
+  .temp-row .input-box input { height: 52px; font-size: 1.375rem; font-weight: 600; text-align: center; }
+  .step-btn { width: 52px; height: 52px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff;
+              font: inherit; font-size: 1.375rem; color: var(--ink); cursor: pointer; }
+  .step-btn:hover { border-color: var(--ink-soft); }
+  .wline { margin: 8px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: .8125rem; color: var(--ink-soft); }
+  .wline .link-btn { font-size: .8125rem; }
   .chip input[type=checkbox] { position: absolute; opacity: 0; pointer-events: none; }
   .chip input:checked + span { background: var(--ink); border-color: var(--ink); color: #fff; }
-  details.ex { border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
-  details.ex summary { padding: 14px 16px; cursor: pointer; font-size: .9375rem; font-weight: 500; list-style: none;
-                       display: flex; justify-content: space-between; align-items: center; }
-  details.ex summary::-webkit-details-marker { display: none; }
-  details.ex summary::after { content: "펼치기"; font-size: .8125rem; color: var(--ink-soft); font-weight: 400; }
-  details.ex[open] summary::after { content: "접기"; }
-  .ex-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 0 16px 16px; }
-  .ex-item { position: relative; cursor: pointer; }
-  .ex-item input { position: absolute; opacity: 0; pointer-events: none; }
-  .ex-thumb { position: relative; display: grid; place-items: center; aspect-ratio: 1; border-radius: 10px;
-              background: #f5f5f4; overflow: hidden; border: 2px solid transparent; }
-  .ex-thumb img { width: 100%; height: 100%; object-fit: cover; }
-  .ex-thumb svg { width: 64%; height: 64%; }
-  .ex-item small { display: block; margin-top: 4px; font-size: .75rem; color: var(--ink-soft);
-                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ex-item input:checked + .ex-thumb { border-color: var(--danger); }
-  .ex-item input:checked + .ex-thumb::after { content: "빼기"; position: absolute; inset: 0; display: grid; place-items: center;
-                                              background: rgb(255 255 255 / .7); color: var(--danger); font-weight: 700; font-size: .8125rem; }
-  .ex-item input:focus-visible + .ex-thumb { outline: 2px solid var(--ink); outline-offset: 2px; }
-  .warn { padding: 16px; border-radius: var(--radius); background: var(--camel-soft); font-size: .9375rem; }
+  .style-text { margin-top: 10px; }
+  .warn { padding: 16px; border-radius: var(--radius); background: #f5f5f5; font-size: .9375rem; }
   .warn p { margin: 0 0 12px; }
-  @media (min-width: 640px) { .ex-grid { grid-template-columns: repeat(6, 1fr); } }
 </style>
 {% endblock %}
 {% block content %}
 {% from "macros.html" import garment_art %}
 <div class="rec">
   <h1>코디 추천</h1>
-  <p class="soft" style="margin:6px 0 0">내 옷장에 있는 옷으로만 코디를 최대 3개 골라 드려요.</p>
 
   {% if server_error %}<div class="alert" role="alert" style="margin-top:20px">{{ server_error }}</div>{% endif %}
 
   {% if missing %}
   <div class="warn" style="margin-top:20px" role="status">
-    <p><b>{{ with_iga(missing | map("ko", "category") | list) }}</b> 없어서 아직 코디를 만들 수 없어요.
-       상의·하의를 한 벌씩은 등록해 주세요. (세탁 중·추천 제외인 옷은 빠져요)</p>
+    <p>입을 수 있는 <b>{{ with_iga(missing | map("ko", "category") | list) }}</b> 없어서 코디를 만들 수 없어요.</p>
     <a class="btn btn-primary" href="/garments/new" style="height:40px">옷 등록하기</a>
   </div>
   {% endif %}
 
   <form class="stack" method="get" action="/recommend/result" novalidate data-loading="코디 고르는 중…">
     <fieldset class="field">
-      <legend>오늘 기온 <small>필수</small></legend>
-      <div class="weather" {% if not autofill %}hidden{% endif %}>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
-        <span id="weather-status" aria-live="polite">오늘 기온을 불러오는 중…</span>
-        <button type="button" class="link-btn" id="weather-reload" hidden>다시 불러오기</button>
-      </div>
-      <div class="bands">
-        {% for key, name, range_, t in TEMP_BANDS %}
-        <label class="band"><input type="radio" name="band" value="{{ key }}" {% if form.band == key and not form.temp %}checked{% endif %}>
-          <span><b>{{ name }}</b><small>{{ range_ }}</small></span></label>
-        {% endfor %}
-      </div>
-      <div class="exact">
-        <label for="temp">또는 직접 입력</label>
+      <legend><label for="temp">오늘 기온</label></legend>
+      <div class="temp-row">
+        <button type="button" class="step-btn" data-step="-1" aria-label="1도 내리기">−</button>
         <div class="input-box{% if errors.temp %} invalid{% endif %}">
-          <input id="temp" name="temp" inputmode="decimal" placeholder="예: 7" value="{{ form.temp or '' }}"
+          <input id="temp" name="temp" inputmode="decimal" placeholder="15" value="{{ form.temp or '' }}" autocomplete="off"
                  {% if errors.temp %}aria-invalid="true" aria-describedby="temp-error" autofocus{% endif %}>
           <span class="suffix">°C</span>
         </div>
+        <button type="button" class="step-btn" data-step="1" aria-label="1도 올리기">+</button>
       </div>
+      <p class="wline"><span id="weather-status" aria-live="polite">{% if autofill %}지금 기온 불러오는 중…{% endif %}</span>
+        <button type="button" class="link-btn" id="weather-reload" {% if autofill %}hidden{% endif %}>지금 기온 불러오기</button></p>
       {% if errors.temp %}<p class="field-error" id="temp-error">{{ errors.temp }}</p>{% endif %}
     </fieldset>
 
     <fieldset class="field">
-      <legend>상황 <small>선택</small></legend>
+      <legend>상황</legend>
       <div class="chips">
         <label class="chip"><input type="radio" name="occasion" value="" {% if not form.occasion %}checked{% endif %}><span>상관없음</span></label>
         {% for o in LABELS["occasion"] %}
@@ -373,30 +473,18 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
     </fieldset>
 
     <fieldset class="field">
-      <legend>원하는 스타일 <small>선택 · 최대 {{ MAX_PREF_STYLES }}개</small></legend>
+      <legend>원하는 스타일</legend>
       <div class="chips" id="pref-styles">
-        {% for s in LABELS["style"] %}
+        {% for s in QUICK_STYLES %}
         <label class="chip"><input type="checkbox" name="styles" value="{{ s }}" {% if s in form.styles %}checked{% endif %}><span>{{ s | ko("style") }}</span></label>
         {% endfor %}
       </div>
+      <div class="input-box style-text">
+        <input name="style_text" maxlength="{{ MAX_STYLE_TEXT }}" value="{{ form.style_text or '' }}" autocomplete="off"
+               placeholder="직접 입력 (예: 빈티지, 꾸안꾸)" aria-label="원하는 스타일 직접 입력">
+      </div>
       {% if errors.styles %}<p class="field-error">{{ errors.styles }}</p>{% endif %}
     </fieldset>
-
-    {% if usable %}
-    <details class="ex" {% if form.exclude %}open{% endif %}>
-      <summary>오늘 입기 싫은 옷 빼기 <small class="soft" id="ex-count">{% if form.exclude %}{{ form.exclude | length }}벌 뺌{% endif %}</small></summary>
-      <div class="ex-grid">
-        {% for g in usable %}
-        <label class="ex-item" title="{{ garment_name(g) }}">
-          <input type="checkbox" name="exclude" value="{{ g.garment_id }}" {% if g.garment_id in form.exclude %}checked{% endif %}
-                 aria-label="{{ garment_name(g) }} 빼기">
-          <span class="ex-thumb">{{ garment_art(g) }}</span>
-          <small>{{ garment_name(g) }}</small>
-        </label>
-        {% endfor %}
-      </div>
-    </details>
-    {% endif %}
 
     <button type="submit" class="btn btn-primary" {% if missing %}disabled{% endif %}>코디 추천받기</button>
   </form>
@@ -404,11 +492,13 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
 {% endblock %}
 {% block script %}
 <script>
-  // 직접 입력하면 기온 구간 선택 해제, 구간 고르면 직접 입력 비우기
+  // 기온 1도씩 올리기·내리기
   const temp = document.getElementById("temp");
-  const bands = document.querySelectorAll("input[name=band]");
-  temp.addEventListener("input", () => { if (temp.value.trim()) bands.forEach((b) => (b.checked = false)); });
-  bands.forEach((b) => b.addEventListener("change", () => { temp.value = ""; }));
+  document.querySelectorAll(".step-btn").forEach((b) => b.addEventListener("click", () => {
+    const now = parseFloat(temp.value);
+    const next = (Number.isFinite(now) ? now : 15) + Number(b.dataset.step);
+    temp.value = Math.min(45, Math.max(-30, Math.round(next * 10) / 10));
+  }));
 
   // 오늘 기온 자동 입력: 위치 허용 → 현재 위치, 거부·실패·응답 없음 → 서울 기준
   const wStatus = document.getElementById("weather-status"), wReload = document.getElementById("weather-reload");
@@ -416,19 +506,19 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
     const res = await fetch(`/weather?lat=${lat}&lon=${lon}`, { headers: { "X-Requested-With": "fetch" } });
     if (!res.ok) throw new Error("weather");
     const w = await res.json();
-    temp.value = w.temperature_c; bands.forEach((b) => (b.checked = b.value === w.band));  // 맞는 구간 표시 (보낼 때는 숫자가 우선)
+    temp.value = w.temperature_c;
     const place = isFallback ? "서울" : (w.location_name || "현재 위치");
     const cond = w.condition && w.condition !== "Mock" ? ` · ${w.condition}` : "";
-    wStatus.textContent = `${place} 기온 ${w.temperature_c}°C${cond}를 넣었어요.` + (isFallback ? " (위치를 몰라서 서울 기준)" : "");
+    wStatus.textContent = `${place} 기준${cond}`;
   }
   function autoWeather() {
     let done = false;
-    wStatus.textContent = "오늘 기온을 불러오는 중…"; wReload.hidden = true;
+    wStatus.textContent = "지금 기온 불러오는 중…"; wReload.hidden = true;
     const finish = () => { done = true; wReload.hidden = false; };
     const fallback = () => {
       if (done) return; done = true;
       fillWeather(37.57, 126.98, true)
-        .catch(() => { wStatus.textContent = "기온을 불러오지 못했어요. 구간을 고르거나 직접 입력해 주세요."; })
+        .catch(() => { wStatus.textContent = "불러오지 못했어요. 직접 입력해 주세요."; })
         .finally(finish);
     };
     if (!window.isSecureContext || !navigator.geolocation) return fallback();
@@ -450,50 +540,81 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
     boxes.forEach((b) => { b.disabled = !b.checked && n >= {{ MAX_PREF_STYLES }}; b.parentElement.style.opacity = b.disabled ? .45 : 1; });
   }
   boxes.forEach((b) => b.addEventListener("change", limit)); limit();
-  // 뺀 옷 개수
-  const ex = document.querySelectorAll("input[name=exclude]"), exCount = document.getElementById("ex-count");
-  ex.forEach((b) => b.addEventListener("change", () => {
-    const n = [...ex].filter((x) => x.checked).length; exCount.textContent = n ? n + "벌 뺌" : "";
-  }));
 </script>
 {% endblock %}
 """
 
+OUTFIT_CARD_HTML = """{# 코디 카드 가운데: 옷 목록(아우터·상의·하의) + 착샷이 생기면 왼쪽에 사진 (홈·추천 결과 공통) #}
+{% macro outfit_css() %}
+<style>
+  .fit { margin-top: 12px; display: grid; grid-template-columns: 1fr; gap: 14px; align-items: center; }
+  .fit.with-shot { grid-template-columns: 112px 1fr; }   /* 착샷이 있으면 왼쪽에 */
+  .mq { aspect-ratio: 2 / 3; border-radius: 12px; overflow: hidden; }
+  .mq[hidden] { display: none; }
+  .plist { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .prow { display: grid; grid-template-columns: 52px 1fr; gap: 10px; align-items: center; color: inherit; text-decoration: none;
+          padding: 4px; margin: -4px; border-radius: 10px; }
+  a.prow:hover { background: #f5f5f5; }
+  .pthumb { display: grid; place-items: center; aspect-ratio: 1; border-radius: 10px; background: #f5f5f5; overflow: hidden; }
+  .pthumb img { width: 100%; height: 100%; object-fit: cover; }
+  .pthumb svg { width: 64%; height: 64%; }
+  .prow.none .pthumb { border: 1.5px dashed #d4d4d4; background: none; color: var(--muted); font-size: .6875rem; }
+  .prow small { display: block; font-size: .75rem; color: var(--muted); }
+  .prow b { display: block; font-size: .875rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .prow.none b { font-weight: 400; color: var(--ink-soft); }
+</style>
+{% endmacro %}
+
+{% macro outfit_fit(items, by_id) %}
+{% from "macros.html" import garment_art %}
+      <div class="fit">
+        <div class="mq" hidden></div>
+        <div class="plist">
+          {% for slot, slot_name in SLOTS %}
+          {% set gid = items[slot] %}
+          {% if gid and by_id.get(gid) %}{% set g = by_id[gid] %}
+          <a class="prow" href="/garments/{{ gid }}">
+            <span class="pthumb">{{ garment_art(g) }}</span>
+            <span><small>{{ slot_name }}</small><b>{{ garment_name(g) }}</b></span>
+          </a>
+          {% elif gid %}
+          <div class="prow none">
+            <span class="pthumb">?</span>
+            <span><small>{{ slot_name }}</small><b>찾을 수 없음</b></span>
+          </div>
+          {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+{% endmacro %}
+"""
+
 RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
+{% from "outfit_card.html" import outfit_css, outfit_fit %}
 {% block title %}추천 코디{% endblock %}
 {% block page_head %}
+{{ outfit_css() }}
 <style>
   .res { max-width: 1040px; margin: 0 auto; }
   .head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
   .conds { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
-  .conds span { padding: 4px 10px; border-radius: 999px; background: #ece9e6; font-size: .8125rem; }
+  .conds span { padding: 4px 10px; border-radius: 6px; background: #eeeeee; font-size: .8125rem; }
   .again { height: 40px; padding: 0 14px; font-size: .9375rem; }
   .outfits { margin-top: 24px; display: grid; gap: 16px; }
-  .outfit { display: flex; flex-direction: column; background: #fff; border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
+  .outfit { display: flex; flex-direction: column; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
   .outfit h2 { margin: 0; font-size: 1rem; display: flex; align-items: center; gap: 8px; }
-  .outfit h2 .num { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%;
-                    background: var(--ink); color: #fff; font-size: .8125rem; }
   .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
-  .tags span { padding: 2px 8px; border-radius: 999px; background: #f5f5f4; font-size: .75rem; color: var(--ink-soft); }
-  .pieces { margin-top: 14px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-  .piece { display: block; color: inherit; text-decoration: none; }
-  .pthumb { position: relative; display: grid; place-items: center; aspect-ratio: 1; border-radius: 12px; background: #f5f5f4; overflow: hidden; }
-  .pthumb img { width: 100%; height: 100%; object-fit: cover; }
-  .pthumb svg { width: 62%; height: 62%; }
-  .piece:hover .pthumb { box-shadow: inset 0 0 0 2px var(--line); }
-  .piece small { display: block; margin-top: 6px; font-size: .75rem; color: var(--muted); }
-  .piece b { display: block; font-size: .875rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .piece.none .pthumb { border: 1.5px dashed #d6d3d1; background: none; color: var(--muted); font-size: .8125rem; }
+  .tags span { padding: 2px 8px; border-radius: 6px; background: #f5f5f5; font-size: .75rem; color: var(--ink-soft); }
   .reason { margin: 14px 0 0; font-size: .9375rem; line-height: 1.6; flex: 1; }
-  .fb { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .fb { margin-top: 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .fb button { height: 40px; border: 1px solid var(--line); border-radius: 10px; background: #fff; font: inherit;
                font-size: .875rem; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
   .fb button:hover { border-color: var(--ink-soft); }
   .fb button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
   .fb button[aria-pressed="true"].up { background: var(--ink); color: #fff; border-color: var(--ink); }
-  .fb button[aria-pressed="true"].down { background: #f5f5f4; color: var(--ink); border-color: var(--ink-soft); }
+  .fb button[aria-pressed="true"].down { background: #f5f5f5; color: var(--ink); border-color: var(--ink-soft); }
   .fb-msg { margin: 8px 0 0; font-size: .8125rem; color: var(--ink-soft); min-height: 1.2em; }
-  .empty { margin-top: 24px; padding: 40px 24px; border: 1px dashed var(--line); border-radius: 16px; background: #fff; text-align: center; }
+  .empty { margin-top: 24px; padding: 40px 24px; border: 1px dashed var(--line); border-radius: 10px; background: #fff; text-align: center; }
   .empty h2 { margin: 0; font-size: 1.125rem; }
   .empty p { margin: 8px 0 20px; }
   @media (min-width: 900px) {
@@ -503,15 +624,15 @@ RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
 {% endblock %}
 {% block content %}
 {% from "macros.html" import garment_art %}
-{% set band_name = {"freezing": "한파", "cold": "추움", "mild": "선선", "hot": "더움"} %}
+{% from "tryon.html" import tryon_button, tryon_dialog with context %}
 <div class="res">
   <div class="head">
     <div>
       <h1>추천 코디</h1>
       <div class="conds" aria-label="고른 조건">
-        <span>{{ band_name[band] }} · {{ "%g" | format(temperature) }}°C</span>
+        <span>{{ "%g" | format(temperature) }}°C</span>
         {% if form.occasion %}<span>{{ form.occasion | ko("occasion") }}</span>{% endif %}
-        {% for s in form.styles %}<span>{{ s | ko("style") }}</span>{% endfor %}
+        {% for s in form.all_styles %}<span>{{ s | ko("style") }}</span>{% endfor %}
         {% if form.exclude %}<span>{{ form.exclude | length }}벌 뺌</span>{% endif %}
       </div>
     </div>
@@ -522,23 +643,10 @@ RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
   <div class="outfits">
     {% for o in result.outfits %}
     <article class="outfit" aria-labelledby="o{{ loop.index }}">
-      <h2 id="o{{ loop.index }}"><span class="num">{{ loop.index }}</span>코디 {{ loop.index }}</h2>
+      <h2 id="o{{ loop.index }}">코디 {{ loop.index }}</h2>
       {% if o.style_tags %}<div class="tags">{% for s in o.style_tags %}<span>{{ s | ko("style") }}</span>{% endfor %}</div>{% endif %}
-      <div class="pieces">
-        {% for slot, slot_name in SLOTS %}
-        {% set gid = o["items"][slot] %}
-        {% if gid and by_id.get(gid) %}{% set g = by_id[gid] %}
-        <a class="piece" href="/garments/{{ gid }}">
-          <span class="pthumb">{{ garment_art(g) }}</span>
-          <small>{{ slot_name }}</small><b>{{ garment_name(g) }}</b>
-        </a>
-        {% elif gid %}
-        <div class="piece none"><span class="pthumb">찾을 수 없음</span><small>{{ slot_name }}</small><b>-</b></div>
-        {% else %}
-        <div class="piece none"><span class="pthumb">없음</span><small>{{ slot_name }}</small><b>{{ "필요 없어요" if slot == "outerwear" else "-" }}</b></div>
-        {% endif %}
-        {% endfor %}
-      </div>
+      {{ outfit_fit(o["items"], by_id) }}
+      {{ tryon_button(o["items"], loop.index, profile) }}
       {% if o.reason %}<p class="reason">{{ o.reason }}</p>{% endif %}
       <form class="fb" method="post" action="/recommend/feedback" data-fb>
         <input type="hidden" name="recommendation_id" value="{{ result.recommendation_id }}">
@@ -553,22 +661,20 @@ RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
     </article>
     {% endfor %}
   </div>
-  {% if result.outfits | length < 3 %}
-  <p class="soft" style="margin-top:16px;font-size:.875rem">입을 수 있는 옷이 더 많으면 더 다양한 코디를 볼 수 있어요.</p>
-  {% endif %}
   {% else %}
   <section class="empty">
     <h2>조건에 맞는 코디를 찾지 못했어요</h2>
     {% if missing %}
-    <p class="soft">입을 수 있는 {{ with_iga(missing | map("ko", "category") | list) }} 없어요. 옷을 등록하거나, 뺀 옷·세탁 중인 옷을 확인해 보세요.</p>
+    <p class="soft">입을 수 있는 {{ with_iga(missing | map("ko", "category") | list) }} 없어요.</p>
     <a class="btn btn-primary" href="/garments/new">옷 등록하기</a>
     {% else %}
-    <p class="soft">기온이나 스타일 조건을 바꾸거나, 뺀 옷을 줄여 보세요.</p>
+
     <a class="btn btn-secondary" href="/recommend">조건 바꾸기</a>
     {% endif %}
   </section>
   {% endif %}
 </div>
+{{ tryon_dialog() }}
 {% endblock %}
 {% block script %}
 <script>
@@ -582,12 +688,117 @@ RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
         const res = await fetch(form.action, { method: "POST", body, headers: { "X-Requested-With": "fetch" } });
         if (!res.ok) throw new Error();
         form.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
-        msg.textContent = btn.value === "1" ? "좋아요를 남겼어요. 다음 추천에 반영돼요." : "알려 주셔서 고마워요. 다음엔 다르게 골라 볼게요.";
+        msg.textContent = "";
       } catch {
-        msg.textContent = "의견을 보내지 못했어요. 잠시 후 다시 눌러 주세요.";
+        msg.textContent = "보내지 못했어요. 다시 눌러 주세요.";
       }
     }));
   });
+</script>
+{% endblock %}
+"""
+
+HOME_HTML = """{% extends "app_base.html" %}
+{% from "outfit_card.html" import outfit_css, outfit_fit %}
+{% from "tryon.html" import tryon_button, tryon_dialog with context %}
+{% block title %}홈{% endblock %}
+{% block page_head %}
+{{ outfit_css() }}
+<style>
+  .home { max-width: 640px; margin: 0 auto; }
+  .date { margin: 0; font-size: .9375rem; color: var(--ink-soft); }
+  .temp { margin: 2px 0 0; font-size: 2.75rem; font-weight: 700; line-height: 1.15; letter-spacing: -.02em; }
+  .wmeta { margin: 2px 0 0; display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: .875rem; color: var(--ink-soft); }
+  .wmeta .link-btn { font-size: .8125rem; font-weight: 500; }
+  .sec { margin-top: 32px; }
+  .sec-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .sec-head h2 { margin: 0; font-size: 1.0625rem; }
+  .sec-head a { font-size: .875rem; color: var(--ink-soft); text-decoration: none; }
+  .sec-head a:hover { color: var(--ink); text-decoration: underline; }
+  .outfit { margin-top: 12px; padding: 16px; background: #fff; border: 1px solid var(--line); border-radius: 10px; }
+  .outfit .fit { margin-top: 0; }
+  .empty { margin-top: 12px; padding: 20px 16px; background: #fff; border: 1px solid var(--line); border-radius: 10px; }
+  .empty p { margin: 0 0 12px; font-size: .9375rem; }
+  .empty .btn { height: 40px; }
+  .stats { margin-top: 12px; display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line);
+           border-radius: 10px; background: #fff; overflow: hidden; }
+  .stats a { display: flex; flex-direction: column; gap: 2px; padding: 14px 12px; color: inherit; text-decoration: none; }
+  .stats a + a { border-left: 1px solid var(--line); }
+  .stats a:hover { background: #f5f5f5; }
+  .stats small { font-size: .75rem; color: var(--ink-soft); }
+  .stats b { font-size: 1.25rem; }
+  .add { margin-top: 12px; width: 100%; height: 44px; }
+</style>
+{% endblock %}
+{% block content %}
+<div class="home">
+  <section aria-label="오늘 날씨">
+    <p class="date">{{ date_label }}</p>
+    {% if weather %}
+    <p class="temp">{{ "%g" | format(weather.temperature_c) }}°C</p>
+    <p class="wmeta"><span>{{ place }}{% if weather.condition and weather.condition != "Mock" %} · {{ weather.condition }}{% endif %}</span>
+      {% if is_fallback %}<button type="button" class="link-btn" id="loc-again">내 위치로</button>{% endif %}</p>
+    {% else %}
+    <p class="temp">-°C</p>
+    <p class="wmeta">기온을 불러오지 못했어요.</p>
+    {% endif %}
+  </section>
+
+  <section class="sec" aria-labelledby="today-title">
+    <div class="sec-head">
+      <h2 id="today-title">오늘의 코디</h2>
+      {% if weather %}<a href="/recommend/result?temp={{ '%g' | format(weather.temperature_c) }}">다른 코디</a>{% endif %}
+    </div>
+    {% if outfit %}
+    <article class="outfit">
+      {{ outfit_fit(outfit["items"], by_id) }}
+      {{ tryon_button(outfit["items"], 1, profile, "오늘의 코디 착샷") }}
+    </article>
+    {% elif missing %}
+    <div class="empty">
+      <p>입을 수 있는 {{ with_iga(missing | map("ko", "category") | list) }} 없어서 코디를 만들 수 없어요.</p>
+      <a class="btn btn-primary" href="/garments/new">옷 등록</a>
+    </div>
+    {% else %}
+    <div class="empty">
+      <p>{{ outfit_error or "오늘의 코디를 불러오지 못했어요." }}</p>
+      <a class="btn btn-secondary" href="/recommend">조건 골라서 추천받기</a>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="sec" aria-labelledby="closet-title">
+    <div class="sec-head">
+      <h2 id="closet-title">내 옷장 <span class="soft" style="font-weight:400;font-size:.9375rem">{{ total }}벌</span></h2>
+      <a href="/wardrobe">전체 보기</a>
+    </div>
+    <div class="stats">
+      {% for c in ["top", "bottom", "outerwear"] %}
+      <a href="/wardrobe?category={{ c }}"><small>{{ c | ko("category") }}</small><b>{{ cat_counts[c] }}</b></a>
+      {% endfor %}
+      <a href="/wardrobe?status=laundry"><small>세탁 중</small><b>{{ laundry }}</b></a>
+    </div>
+    <a class="btn btn-secondary add" href="/garments/new">옷 등록</a>
+  </section>
+</div>
+{{ tryon_dialog() }}
+{% endblock %}
+{% block script %}
+<script>
+  // 내 위치 → 쿠키(소수 둘째 자리) → 새로고침하면 서버가 그 위치 기온으로 다시 그림. 거부하면 서울 기준
+  (() => {
+    const save = (v) => { document.cookie = `{{ LOC_COOKIE }}=${v}; path=/; max-age=${60 * 60 * 24 * 7}; samesite=lax`; };
+    function ask() {
+      if (!window.isSecureContext || !navigator.geolocation) return save("none");
+      navigator.geolocation.getCurrentPosition(
+        (p) => { save(`${p.coords.latitude.toFixed(2)},${p.coords.longitude.toFixed(2)}`); location.reload(); },
+        () => save("none"),
+        { timeout: 8000, maximumAge: 10 * 60 * 1000 },
+      );
+    }
+    document.getElementById("loc-again")?.addEventListener("click", ask);
+    {% if ask_location %}ask();{% endif %}
+  })();
 </script>
 {% endblock %}
 """
@@ -596,9 +807,14 @@ register_templates(
     {
         "recommend_form.html": RECOMMEND_FORM_HTML,
         "recommend_result.html": RECOMMEND_RESULT_HTML,
+        "outfit_card.html": OUTFIT_CARD_HTML,
+        "home.html": HOME_HTML,
     },
     TEMP_BANDS=TEMP_BANDS,
     MAX_PREF_STYLES=MAX_PREF_STYLES,
+    QUICK_STYLES=QUICK_STYLES,
+    MAX_STYLE_TEXT=MAX_STYLE_TEXT,
+    LOC_COOKIE=LOC_COOKIE,
     SLOTS=SLOTS,
     with_iga=with_iga,
 )

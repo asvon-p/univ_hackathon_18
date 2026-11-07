@@ -91,29 +91,37 @@ def image_url(garment: Garment) -> str | None:
     return f"/garment-images/{garment.garment_id}" if garment.cutout_path else None
 
 
-async def fetch_image(token: str, garment_id: str) -> tuple[bytes, str]:
-    """옷 사진 (내용, content-type). 누끼 → 없으면 원본. 없으면 ApiError(404)."""
+def may_have_photo(garment: Garment) -> bool:
+    """사진(원본·누끼)이 있을 수 있는 옷인지. 실제 모드는 등록할 때 원본을 올리므로 일단 True."""
+    if USE_MOCK:
+        return garment.garment_id in _MOCK_IMAGES
+    return True
+
+
+async def fetch_image(
+    token: str, garment_id: str, kinds: tuple[str, ...] = ("cutout", "original")
+) -> tuple[bytes, str]:
+    """옷 사진 (내용, content-type). kinds 순서대로 찾음 (기본: 누끼 → 원본). 없으면 ApiError(404).
+
+    착샷(connect/tryon.py)에는 배경이 있는 원본이 나아서 ("original", "cutout")으로 부름.
+    """
     if USE_MOCK:
         _mock_find(token, garment_id)  # 내 옷인지 확인 (아니면 404)
         if garment_id not in _MOCK_IMAGES:
             raise ApiError(404, "사진이 없어요.", "IMAGE_NOT_FOUND")
         return _MOCK_IMAGES[garment_id]
-    try:
-        return await request_bytes(
-            "GET",
-            f"/garments/{garment_id}/image",
-            token=token,
-            params={"kind": "cutout"},
-        )
-    except ApiError as e:
-        if e.status != 404:
-            raise
-        return await request_bytes(
-            "GET",
-            f"/garments/{garment_id}/image",
-            token=token,
-            params={"kind": "original"},
-        )
+    for i, kind in enumerate(kinds):
+        try:
+            return await request_bytes(
+                "GET",
+                f"/garments/{garment_id}/image",
+                token=token,
+                params={"kind": kind},
+            )
+        except ApiError as e:
+            if e.status != 404 or i == len(kinds) - 1:
+                raise
+    raise ApiError(404, "사진이 없어요.", "IMAGE_NOT_FOUND")
 
 
 # ---- Mock: 데모 계정은 mocks/garments.json, 새 계정은 빈 옷장. 올린 사진은 메모리에 보관 ----

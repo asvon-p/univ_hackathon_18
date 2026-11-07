@@ -9,10 +9,12 @@
 | garment_storage.py    | feat/garment-storage · C (+ vision-extraction·segmentation · B) | 일부 Mock  |
 | recommendation.py     | feat/recommendation-rules·ranking · A, recommendation-feedback · A+C | Mock |
 | weather.py            | C (백엔드가 날씨 API 호출, 담당 브랜치 미정)                  | Mock, API 제안 |
+| tryon.py              | 착샷 서버 (FASHN VTON v1.5, 시아가 띄운 GPU 서버)            | 실제 연결 ✅ |
 
-환경 변수
+환경 변수 (frontend/.env 파일에 적어 두면 자동으로 읽음 — .env는 커밋 금지, .env.example 참고)
 - BACKEND_API_URL   : 백엔드 주소 (기본 http://localhost:8000/api/v1)
 - FRONTEND_USE_MOCK : "false"면 실제 백엔드 호출, 그 외에는 Mock (기본 Mock)
+- TRYON_API_URL, TRYON_API_KEY : 착샷 서버 주소·키 (connect/tryon.py)
 """
 
 from __future__ import annotations
@@ -25,6 +27,27 @@ import httpx
 
 # 팀 공통 데이터 계약(shared/contracts.py)을 그대로 씁니다
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_env_file(path: Path) -> None:
+    """frontend/.env 의 KEY=VALUE 를 환경 변수로 (이미 설정된 값이 우선). 라이브러리 없이."""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.removeprefix("export ").strip()
+        value = value.strip().strip("\"'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_env_file(Path(__file__).resolve().parents[1] / ".env")
+
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
