@@ -1,0 +1,10 @@
+gradio>=5.0
+pillow>=10.0
+onnxruntime-gpu>=1.20,<1.24
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+requests>=2.31
+# torch/torchvision: CUDA 12.4 빌드로 설치
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# fashn-vton 본체: pip install -e ./fashn-vton-1.5
