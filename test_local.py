@@ -135,3 +135,47 @@ for temp in [-5, 5, 15, 25]:
     for level in [1, 2, 3, 4, 5]:
         suitable = is_weather_suitable(level, temp)
         print(f"기온 {temp}°C / 두께 {level} → {suitable}")
+
+
+from recommendation.ranking import recommend_top3
+from shared.contracts import GarmentAttributes, UserContext
+
+test_garments = [
+    GarmentAttributes(
+        garment_id="t1",
+        category="top",
+        color="black",
+        style_candidates=["formal"],
+        thermal_level=3
+    ),
+    GarmentAttributes(
+        garment_id="t2",
+        category="top",
+        color="beige",
+        style_candidates=["casual"],
+        thermal_level=3
+    ),
+    GarmentAttributes(
+        garment_id="b1",
+        category="bottom",
+        color="white",
+        style_candidates=["dandy"],
+        thermal_level=3
+    ),
+    GarmentAttributes(
+        garment_id="b2",
+        category="bottom",
+        color="brown",
+        style_candidates=["casual"],
+        thermal_level=3
+    )
+]
+
+test_context = UserContext(
+    user_id="test",
+    temperature_c=15,
+    occasion="interview"
+)
+
+print("=== TOP 3 추천 결과 ===")
+print(recommend_top3(test_garments, test_context))
