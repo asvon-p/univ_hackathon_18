@@ -1,0 +1,7 @@
+# 실제 모델 추론 없이 동작하는 시연 모드 필수 의존성
+Pillow>=10.0,<13
+numpy>=1.26,<3
+# 실제 zero-shot 분류를 켤 때만 별도 설치:
+# pip install 'transformers>=4.40,<5' 'torch>=2.3'
+# 고품질 배경 제거를 켤 때만 별도 설치 (onnxruntime 포함):
+# pip install 'rembg[cpu]>=2.0'
