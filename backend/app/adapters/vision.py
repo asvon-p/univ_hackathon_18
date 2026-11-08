@@ -70,8 +70,10 @@ class LocalVision:
 
     name = "local"
 
-    def __init__(self, module_name: str = "vision"):
+    def __init__(self, module_name: str = "vision", **options):
         self._module = importlib.import_module(module_name)
+        if options:
+            self._module = self._module.create_pipeline(**options)
 
     def warmup(self) -> None:
         warm = getattr(self._module, "warmup", None)

@@ -7,7 +7,14 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.db.models import AccountStorageDeletionJob, Garment, StorageDeletionJob, User
+from backend.app.db.models import (
+    AccountStorageDeletionJob,
+    BodyPhotoDeletionJob,
+    Garment,
+    StorageDeletionJob,
+    User,
+    UserProfile,
+)
 from backend.app.storage.base import StoragePort
 
 log = logging.getLogger(__name__)
@@ -92,6 +99,25 @@ class AccountStorageCleanupService(StorageCleanupService):
         return str(job.user_id)
 
 
+class BodyPhotoCleanupService(StorageCleanupService):
+    job_model = BodyPhotoDeletionJob
+    id_field = "photo_id"
+
+    def _is_live(self, job) -> bool:
+        return (
+            self.db.scalar(
+                select(UserProfile.user_id).where(
+                    UserProfile.user_id == job.user_id,
+                    UserProfile.body_photo_id == job.photo_id,
+                )
+            )
+            is not None
+        )
+
+    def _prefix(self, job) -> str:
+        return f"{job.user_id}/body-photos/{job.photo_id}"
+
+
 def process_pending_deletions() -> dict[str, int]:
     from backend.app.db.session import get_sessionmaker
     from backend.app.storage.local import get_storage
@@ -100,4 +126,5 @@ def process_pending_deletions() -> dict[str, int]:
         storage = get_storage()
         accounts = AccountStorageCleanupService(db, storage).drain()
         garments = StorageCleanupService(db, storage).drain()
-        return {key: accounts[key] + garments[key] for key in accounts}
+        photos = BodyPhotoCleanupService(db, storage).drain()
+        return {key: accounts[key] + garments[key] + photos[key] for key in accounts}

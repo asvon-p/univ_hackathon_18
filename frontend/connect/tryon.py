@@ -15,7 +15,7 @@ GET  /health  → {"status": "ok", "gpu", "queued", ...}  (키 없이)
 - 여러 벌은 결과 사진을 다음 사람 사진으로 넣어 차례로 입힘 (하의 → 상의 → 아우터)
 - 나중에 C의 백엔드가 이 서버를 대신 불러 주면(POST /api/v1/tryon) 이 파일만 고치면 됨
 
-환경 변수 (frontend/.env): TRYON_API_URL, TRYON_API_KEY
+프로세스 환경 변수: TRYON_API_URL, TRYON_API_KEY. 로컬 실행기가 자동으로 전달합니다.
 """
 
 from __future__ import annotations
@@ -46,8 +46,8 @@ if enabled():
     _log.info("착샷 켜짐: %s", TRYON_API_URL)
 else:
     _log.warning(
-        "착샷 꺼짐: frontend/.env 에 TRYON_API_URL·TRYON_API_KEY 가 없어요. "
-        ".env 를 고쳤다면 서버를 껐다 켜 주세요."
+        "착샷 꺼짐: TRYON_API_URL·TRYON_API_KEY가 설정되지 않았어요. "
+        "로컬 GPU 실행: python -m scripts.frontend_preview --tryon"
     )
 
 
@@ -83,7 +83,7 @@ async def _send(method: str, path: str, **kwargs) -> httpx.Response:
     if not enabled():
         raise ApiError(503, "착샷 서버가 설정되지 않았어요. (TRYON_API_URL·KEY)", "TRYON_OFF")
     try:
-        async with httpx.AsyncClient(base_url=TRYON_API_URL, timeout=TIMEOUT) as c:
+        async with httpx.AsyncClient(base_url=TRYON_API_URL, timeout=TIMEOUT, trust_env=False) as c:
             res = await c.request(method, path, headers={"x-api-key": TRYON_API_KEY}, **kwargs)
     except httpx.HTTPError:
         raise ApiError(

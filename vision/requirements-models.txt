@@ -1,0 +1,4 @@
+# Optional real CLIP classifier + CPU background removal; install torch for your platform first.
+-r requirements.txt
+transformers>=4.40,<5
+rembg[cpu]>=2.0,<3

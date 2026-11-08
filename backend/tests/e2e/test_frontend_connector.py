@@ -69,6 +69,16 @@ def test_team_frontend_connectors_over_real_http_and_postgres(live_api, monkeypa
             )
             saved = await auth.save_profile(token, profile)
             assert saved.height_cm == 170.5 and saved.weight_kg == 60.5 and saved.age == 24
+            body_photo = garment_images(CATALOG[0])[0]  # synthetic fixture, no personal photo
+            photo_version = await auth.upload_body_photo(token, "body.jpg", body_photo, "image/jpeg")
+            assert photo_version and (await auth.get_profile(token)).body_photo_updated_at == photo_version
+            downloaded, mime = await auth.fetch_body_photo(token)
+            assert downloaded and mime == "image/jpeg"
+            await auth.delete_body_photo(token)
+            assert (await auth.get_profile(token)).body_photo_updated_at is None
+            with pytest.raises(module.ApiError) as missing_photo:
+                await auth.fetch_body_photo(token)
+            assert missing_photo.value.code == "BODY_PHOTO_NOT_FOUND"
             garment_ids = []
             for category in ("top", "bottom"):
                 photo, _ = garment_images(next(g for g in CATALOG if g.category == category))

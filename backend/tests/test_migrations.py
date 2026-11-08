@@ -31,6 +31,28 @@ def test_migration_matches_models_and_can_be_reversed(db_session):
 
 
 @pytest.mark.skipif(os.environ.get("TEST_POSTGRES") != "1", reason="PostgreSQL migration test")
+def test_body_photo_migration_preserves_profiles_and_refuses_lossy_downgrade(db_session, auth_account):
+    connection = db_session.connection()
+    config = Config("backend/alembic.ini")
+    config.attributes["connection"] = connection
+    command.downgrade(config, "0010")
+    before = connection.execute(text("SELECT to_jsonb(p) FROM user_profiles p")).scalar_one()
+    command.upgrade(config, "head")
+    after = connection.execute(text("SELECT to_jsonb(p) FROM user_profiles p")).scalar_one()
+    assert {k: after[k] for k in before} == before
+    assert after["body_photo_id"] is None and after["body_photo_updated_at"] is None
+    connection.execute(
+        text(
+            "UPDATE user_profiles SET consent_body_info_at=now(), "
+            "body_photo_id=:id, body_photo_updated_at=now()"
+        ),
+        {"id": uuid4()},
+    )
+    with pytest.raises(RuntimeError, match="export/cleanup"):
+        command.downgrade(config, "0010")
+
+
+@pytest.mark.skipif(os.environ.get("TEST_POSTGRES") != "1", reason="PostgreSQL migration test")
 def test_profile_migration_preserves_legacy_user_and_garments(db_session):
     connection = db_session.connection()
     config = Config("backend/alembic.ini")

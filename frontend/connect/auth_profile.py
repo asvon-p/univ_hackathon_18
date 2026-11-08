@@ -55,6 +55,7 @@ class Profile:
     age: int | None = None
     gender: str | None = None
     body_photo_updated_at: str | None = None  # 읽기 전용: 전신 사진이 있으면 올린 시각
+    user_id: str | None = None  # 서버가 확인한 소유자 ID (JWT 재발급 뒤에도 동일)
 
     def to_json(self) -> dict:
         return {
@@ -72,6 +73,7 @@ class Profile:
             age=data.get("age"),
             gender=data.get("gender"),
             body_photo_updated_at=data.get("body_photo_updated_at"),
+            user_id=data.get("user_id"),
         )
 
 
@@ -114,6 +116,14 @@ async def save_profile(token: str, profile: Profile, *, consent_body_info: bool 
 
 
 # ---- 전신 사진 (착샷용) ------------------------------------------------------
+async def consent_to_body_photo(token: str) -> None:
+    """Explicit photo-form consent; patch only consent, preserving existing body info."""
+    if USE_MOCK:
+        mock_email(token)
+        return
+    await request("PATCH", "/profile", token=token, json={"consent_body_info": True})
+
+
 async def upload_body_photo(token: str, filename: str, content: bytes, content_type: str) -> str | None:
     """전신 사진 저장 → 올린 시각."""
     if USE_MOCK:

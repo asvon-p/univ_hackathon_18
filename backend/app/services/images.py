@@ -4,11 +4,14 @@ import warnings
 from io import BytesIO
 from typing import BinaryIO
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageCms, ImageOps, UnidentifiedImageError
+from pillow_heif import register_heif_opener
 
 from backend.app.core.errors import AppError, ErrorCode
 
-MAX_IMAGE_PIXELS = 32_000_000
+# Includes iPhone 48MP photographs, with a bound checked before decoding.
+MAX_IMAGE_PIXELS = 64_000_000
+register_heif_opener(thumbnails=False, depth_images=False, aux_images=False)
 
 
 def read_upload(stream: BinaryIO, max_bytes: int) -> bytes:
@@ -25,7 +28,7 @@ def normalize_image(data: bytes, *, cutout: bool = False) -> bytes:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(BytesIO(data)) as image:
-                allowed = {"PNG"} if cutout else {"JPEG", "PNG"}
+                allowed = {"PNG"} if cutout else {"JPEG", "PNG", "HEIF"}
                 if image.format not in allowed or image.width * image.height > MAX_IMAGE_PIXELS:
                     raise ValueError("지원하지 않는 이미지 형식 또는 해상도")
                 image.verify()
@@ -33,6 +36,15 @@ def normalize_image(data: bytes, *, cutout: bool = False) -> bytes:
                 image.load()
                 oriented = ImageOps.exif_transpose(image)
                 oriented.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+                # Convert Display P3/other embedded ICC colors before stripping metadata.
+                profile = oriented.info.get("icc_profile")
+                if profile:
+                    oriented = ImageCms.profileToProfile(
+                        oriented.convert("RGBA"),
+                        ImageCms.ImageCmsProfile(BytesIO(profile)),
+                        ImageCms.createProfile("sRGB"),
+                        outputMode="RGBA",
+                    )
                 if cutout:
                     clean = oriented.convert("RGBA")
                 else:
@@ -50,7 +62,10 @@ def normalize_image(data: bytes, *, cutout: bool = False) -> bytes:
         SyntaxError,
         Image.DecompressionBombError,
         Image.DecompressionBombWarning,
+        ImageCms.PyCMSError,
     ) as exc:
         raise AppError(
-            415, ErrorCode.UPLOAD_UNSUPPORTED_TYPE, "정상적인 JPG 또는 PNG 이미지가 필요합니다"
+            415,
+            ErrorCode.UPLOAD_UNSUPPORTED_TYPE,
+            "정상적인 JPG, PNG, HEIC 또는 HEIF 이미지가 필요합니다 (최대 6,400만 픽셀)",
         ) from exc

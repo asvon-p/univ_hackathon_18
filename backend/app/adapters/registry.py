@@ -24,7 +24,17 @@ RECOMMENDER_IMPLS = {"mock": MockRecommender, "local": LocalRecommender}
 @lru_cache
 def get_vision() -> SafeVision:
     s = get_settings()
-    return SafeVision(VISION_IMPLS[s.VISION_PROVIDER](), timeout_sec=s.VISION_TIMEOUT_SEC)
+    inner = (
+        LocalVision(
+            classifier=s.VISION_CLASSIFIER,
+            segmentation=s.VISION_SEGMENTATION,
+            device=s.VISION_DEVICE,
+            demo_category=s.VISION_DEMO_CATEGORY,
+        )
+        if s.VISION_PROVIDER == "local"
+        else MockVision()
+    )
+    return SafeVision(inner, timeout_sec=s.VISION_TIMEOUT_SEC)
 
 
 @lru_cache

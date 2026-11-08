@@ -15,7 +15,9 @@ pyjwt>=2.8
 bcrypt>=4.1
 email-validator>=2.2
 # Image
-pillow>=10.3
+pillow>=11.3,<13
+pillow-heif>=1.1,<2
+-r ../vision/requirements.txt
 # HTTP client (OpenAI Responses adapter) / tests
 httpx>=0.27
 # Dev / test

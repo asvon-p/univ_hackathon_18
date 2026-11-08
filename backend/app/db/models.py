@@ -45,8 +45,14 @@ class UserProfile(Base):
         CheckConstraint("age BETWEEN 0 AND 130", name="age_range"),
         CheckConstraint(
             "consent_body_info_at IS NOT NULL OR (gender IS NULL AND height_cm IS NULL "
-            "AND weight_kg IS NULL AND birth_year IS NULL AND age IS NULL AND avatar_config IS NULL)",
+            "AND weight_kg IS NULL AND birth_year IS NULL AND age IS NULL AND avatar_config IS NULL "
+            "AND body_photo_id IS NULL)",
             name="body_info_consent",
+        ),
+        CheckConstraint(
+            "(body_photo_id IS NULL AND body_photo_updated_at IS NULL) OR "
+            "(body_photo_id IS NOT NULL AND body_photo_updated_at IS NOT NULL)",
+            name="body_photo_pair",
         ),
     )
 
@@ -55,6 +61,8 @@ class UserProfile(Base):
     height_cm: Mapped[float | None] = mapped_column(Float)
     weight_kg: Mapped[float | None] = mapped_column(Float)
     age: Mapped[int | None] = mapped_column(SmallInteger)
+    body_photo_id: Mapped[uuid.UUID | None] = mapped_column()
+    body_photo_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     birth_year: Mapped[int | None] = mapped_column(SmallInteger)
     preferred_styles: Mapped[list[str]] = mapped_column(
         JSON().with_variant(ARRAY(String()), "postgresql"), default=list
@@ -200,6 +208,22 @@ class StorageDeletionJob(Base):
     __table_args__ = (CheckConstraint("attempts >= 0", name="attempts_nonnegative"),)
 
     garment_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID]
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(String(100))
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BodyPhotoDeletionJob(Base):
+    """Version-specific cleanup, also staged durably before writing a new photo."""
+
+    __tablename__ = "body_photo_deletion_jobs"
+    __table_args__ = (CheckConstraint("attempts >= 0", name="attempts_nonnegative"),)
+
+    photo_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     user_id: Mapped[uuid.UUID]
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_error: Mapped[str | None] = mapped_column(String(100))

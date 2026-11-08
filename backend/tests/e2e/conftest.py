@@ -48,6 +48,10 @@ def live_api(request, tmp_path):
             "TEST_DATABASE_URL": child_url.render_as_string(hide_password=False),
             "STORAGE_DIR": str(tmp_path / "storage"),
             "VISION_PROVIDER": provider,
+            "VISION_CLASSIFIER": options.get("classifier", "demo"),
+            "VISION_SEGMENTATION": options.get("segmentation", "flat"),
+            "VISION_DEVICE": "cpu",
+            "VISION_TIMEOUT_SEC": str(options.get("vision_timeout", 20)),
             "RECOMMENDER_PROVIDER": provider,
             "WEATHER_PROVIDER": "open_meteo" if options.get("weather_stub") else "manual",
             "SERVE_FRONTEND": "false",
@@ -108,7 +112,7 @@ def live_api(request, tmp_path):
 
 
 @pytest.fixture
-def live_frontend(live_api, tmp_path):
+def live_frontend(live_api, tmp_path, request):
     """Integrated D UI server; every form request calls the real backend over TCP."""
     backend, provider, runtime = live_api
     with socket.socket() as probe:
@@ -118,14 +122,22 @@ def live_frontend(live_api, tmp_path):
         **os.environ,
         "FITJANG_SKIP_DOTENV": "1",
         "FRONTEND_USE_MOCK": "false",
-        "FRONTEND_BODY_PHOTO_ENABLED": "false",
+        "FRONTEND_BODY_PHOTO_ENABLED": "true" if getattr(request, "param", {}).get("body_photo") else "false",
         "BACKEND_API_URL": str(backend.base_url).rstrip("/") + "/api/v1",
         "TRYON_API_URL": "",
         "TRYON_API_KEY": "",
     }
     with (tmp_path / "frontend.log").open("w", encoding="utf-8") as log:
         process = subprocess.Popen(
-            [sys.executable, "-m", "scripts.preview_server", "frontend.app:app", str(port)],
+            [
+                sys.executable,
+                "-m",
+                "scripts.preview_server",
+                "scripts.mentor_frontend:app"
+                if getattr(request, "param", {}).get("mentor")
+                else "frontend.app:app",
+                str(port),
+            ],
             cwd=ROOT_DIR,
             env=env,
             stdout=log,

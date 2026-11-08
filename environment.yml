@@ -13,3 +13,4 @@ dependencies:
   - pip:
       - -r backend/requirements.txt
       - -r frontend/requirements.txt
+      - -r vision/requirements.txt

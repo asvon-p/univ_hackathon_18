@@ -1,0 +1,5 @@
+outputs/
+weights/
+fashn-vton-1.5/
+*.safetensors
+.venv/

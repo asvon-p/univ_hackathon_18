@@ -14,7 +14,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.adapters import registry
-from backend.app.api.v1 import auth, garments, health, media, profile, recommendations, weather
+from backend.app.api.v1 import (
+    auth,
+    body_photo,
+    garments,
+    health,
+    images,
+    media,
+    profile,
+    recommendations,
+    weather,
+)
 from backend.app.core.config import get_settings
 from backend.app.core.errors import register_exception_handlers
 from backend.app.core.logging import setup_logging
@@ -72,6 +82,8 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(profile.router)
     app.include_router(profile.frontend_router)
+    app.include_router(body_photo.router)
+    app.include_router(images.router)
     app.include_router(garments.router)
     app.include_router(media.router)
     app.include_router(recommendations.router)

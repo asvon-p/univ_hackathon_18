@@ -2,7 +2,12 @@
 
 현재 추천은 **상의·하의 필수 + 선택 아우터**입니다. 신발을 등록하지 않아도 됩니다.
 팀원 A의 실제 ranking 연결, D의 API 호환 경로, GPT-6 Luna 설정과 남은 화면 연동 사항은
-[최신 통합 계약](docs/TEAM_API_CONTRACT.md)을 참고하세요. 계약 `2.0`, 마이그레이션 `0010`입니다.
+[최신 통합 계약](docs/TEAM_API_CONTRACT.md)을 참고하세요. 계약 `2.0`, 마이그레이션 `0011`입니다.
+전신 사진 업로드·조회·삭제 API도 추가했습니다. 기존 신체정보 동의가 필요하며, 교체·삭제·탈퇴 시
+이미지를 안전하게 정리합니다. 전신 사진 화면과 로컬 GPU 착샷 서버도 연결했습니다.
+RTX 5090 실행 방법·테스트 이미지·검증 범위는 [로컬 GPU 착샷 안내](docs/LOCAL_TRYON.md)를 참고하세요.
+현재 공개 HTTPS 시연에서도 착샷을 사용할 수 있습니다([멘토 시연 안내](docs/MENTOR_TRYON.md)).
+팀원 B의 실제 분류·누끼와 아이폰 HEIC 자동 변환은 [Vision·HEIC 통합 가이드](docs/VISION_HEIC.md)를 참고하세요.
 위치 기반 자동 기온 조회와 실패 시 수동 입력 대체를 지원합니다([날씨 연동 안내](docs/WEATHER_INTEGRATION.md)).
 팀원 D의 FastAPI/Jinja2 프론트도 현재 `frontend/`에 통합했습니다.
 `.env`를 열지 않는 독립 검증 서버와 실제 화면 검증 범위는 [프론트 실행 안내](frontend/README.md)를 참고하세요.
@@ -15,6 +20,7 @@
 | `recommendation/` | A | `recommend()` — 추천 엔진 ([가이드](recommendation/README.md)) |
 | `vision/` | B | `extract()` — 의류 속성 추출·분리 ([가이드](vision/README.md)) |
 | `frontend/` | D | 사용자 화면, 2D 아바타 ([가이드](frontend/README.md)) |
+| `tryon_server/` | D·C 연동 | FASHN VTON 1.5 로컬 GPU 착샷 API |
 | `mocks/` | 전원 | Mock JSON 데이터 |
 | `docs/` | 전원 | [합의 사항](docs/DECISIONS.md), [작업 방법](docs/CONTRIBUTING.md), [백엔드 설계](docs/BACKEND_PLAN.md) |
 

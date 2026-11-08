@@ -58,7 +58,9 @@ def test_live_reanalysis_recovers_failed_record_and_preserves_manual_edits(live_
         assert retried.status_code == 200, retried.text
         body = retried.json()
         assert body["analysis_status"] == "done" and body["category"] == "top"
-        assert body["model_version"] == ("mock-1" if provider == "mock" else "stub-0")
+        assert body["model_version"] == (
+            "mock-1" if provider == "mock" else "vision-baseline-0.2/demo/flat/demo-manual-category"
+        )
         edits = {"category": "bottom", "color": "navy", "style_candidates": [], "thermal_level": None}
         assert client.patch(path, headers=headers, json=edits).status_code == 200
         body = client.post(path + "/reanalyze", headers=headers).json()

@@ -12,7 +12,7 @@ from typing import Annotated
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from .common import (
     CATEGORY_ORDER,
@@ -31,6 +31,7 @@ from .common import (
 from .connect import BODY_PHOTO_ENABLED, ApiError
 from .connect import auth_profile as auth
 from .connect import garment_storage as closet
+from .connect.images import normalize_photo
 
 router = APIRouter()
 
@@ -52,7 +53,7 @@ SUBCATEGORIES = {
     "outerwear": ["coat", "jacket", "padding", "jumper", "blazer"],
     "shoes": ["sneakers", "loafers", "boots", "sandals", "heels", "dress_shoes"],
 }
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # DECISIONS: jpg·png, 최대 10MB
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # JPG/PNG/HEIC/HEIF, 최대 10MB
 MAX_STYLES = 3
 
 
@@ -345,6 +346,7 @@ async def body_photo_upload(
     request: Request,
     file: Annotated[UploadFile | None, File()] = None,
     welcome: Annotated[int, Form()] = 0,
+    consent_body_photo: Annotated[str, Form()] = "",
 ):
     token = request.cookies.get(TOKEN_COOKIE)
     if not token:
@@ -361,14 +363,17 @@ async def body_photo_upload(
             file_error=message,
         )
 
+    if consent_body_photo != "1":
+        return fail(422, "전신 사진 저장 및 착샷 생성 활용에 동의해 주세요.")
     try:
-        content, content_type, size = await read_photo(file)
+        content, content_type, size = await read_photo(file, token)
     except PhotoError as e:
         return fail(e.status, e.message)
     if size and abs(size[0] * BODY_H - size[1] * BODY_W) > size[0] * BODY_H * 0.02:
         return fail(400, "사진을 세로 2:3 비율로 잘라서 올려 주세요.")
 
     try:
+        await auth.consent_to_body_photo(token)
         await auth.upload_body_photo(token, file.filename, content, content_type)
     except ApiError as e:
         if e.status == 401:
@@ -415,7 +420,7 @@ async def body_photo_image(request: Request):
     return Response(
         content,
         media_type=content_type,
-        headers={"Cache-Control": "private, max-age=300"},
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
     )
 
 
@@ -556,7 +561,7 @@ async def garment_upload(request: Request, file: Annotated[UploadFile | None, Fi
         )
 
     try:
-        content, content_type, size = await read_photo(file)
+        content, content_type, size = await read_photo(file, token)
     except PhotoError as e:
         return fail(e.status, e.message)
     if size and abs(size[0] - size[1]) > 1:
@@ -577,18 +582,40 @@ class PhotoError(Exception):
         self.status, self.message = status, message
 
 
+@router.post("/photos/normalize")
+async def photo_normalize(request: Request, file: Annotated[UploadFile | None, File()] = None):
+    token = request.cookies.get(TOKEN_COOKIE)
+    if not token:
+        return JSONResponse({"detail": "로그인이 필요합니다"}, status_code=401)
+    try:
+        content, content_type, _ = await read_photo(file, token)
+    except PhotoError as exc:
+        return JSONResponse(
+            {"detail": exc.message}, status_code=exc.status, headers={"Cache-Control": "private, no-store"}
+        )
+    return Response(
+        content,
+        media_type=content_type,
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
 async def read_photo(
     file: UploadFile | None,
+    token: str,
 ) -> tuple[bytes, str, tuple[int, int] | None]:
-    """올린 사진 공통 검사 (jpg·png, 10MB) → (내용, content-type, (가로, 세로) 또는 None)."""
+    """실제 바이트로 검사·표준화 (JPG/PNG/HEIC/HEIF, 10MB); 미리보기는 저장하지 않음."""
     if file is None or not file.filename:
         raise PhotoError(400, "사진을 골라 주세요.")
     content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
         raise PhotoError(413, "사진이 너무 커요. 10MB 이하로 올려 주세요.")
-    content_type = image_type(content)
-    if content_type is None:
-        raise PhotoError(415, "jpg 또는 png 사진만 올릴 수 있어요.")
+    try:
+        content, content_type = await normalize_photo(
+            token, file.filename, content, file.content_type or "application/octet-stream"
+        )
+    except ApiError as exc:
+        raise PhotoError(http_status(exc), exc.message) from exc
     return content, content_type, image_size(content)
 
 
@@ -1183,15 +1210,15 @@ BODY_PHOTO_HTML = """{% extends "app_base.html" %}
     <input type="hidden" name="welcome" value="{{ 1 if welcome else 0 }}">
     <!-- 실제로 서버에 보내는 세로 2:3 사진 (1080x1620 JPEG) -->
     <input type="file" name="file" id="file" accept="image/jpeg" hidden>
-    <input type="file" id="pick" accept="image/jpeg,image/png" hidden>
-    <input type="file" id="snap" accept="image/jpeg,image/png" capture="environment" hidden>
+    <input type="file" id="pick" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif,.hif" hidden>
+    <input type="file" id="snap" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif,.hif" capture="environment" hidden>
 
     <section class="s-choose">
       <div class="drop{% if file_error %} invalid{% endif %}" id="drop">
         <div>
           {{ silhouette("mini") }}
           <strong>머리끝부터 발끝까지 나오게</strong>
-          <small>세로 사진 · jpg, png · 10MB 이하</small>
+          <small>세로 사진 · JPG, PNG, HEIC, HEIF · 10MB 이하</small>
           <div class="pick-btns">
             <button type="button" class="btn btn-primary" id="btn-camera">카메라로 찍기</button>
             <button type="button" class="btn btn-secondary" id="btn-album">앨범에서 고르기</button>
@@ -1234,9 +1261,14 @@ BODY_PHOTO_HTML = """{% extends "app_base.html" %}
       <button type="button" class="btn btn-secondary" id="redo">다시 찍기·고르기</button>
     </section>
 
+    <p id="photo-status" role="status" class="soft" aria-live="polite"></p>
     <p class="field-error" id="file-error" role="alert" {% if not file_error %}hidden{% endif %}>{{ file_error or "" }}</p>
 
     <p class="tips">정면 · 팔 살짝 벌리기 · 단순한 배경 · 혼자 찍을 땐 타이머</p>
+
+    <label class="privacy"><input type="checkbox" name="consent_body_photo" value="1" required>
+      전신 사진 저장 및 착샷 생성 활용에 동의합니다.</label>
+    <p class="privacy">사진은 내 계정에 저장되며 연결된 착샷 서버에서 처리됩니다. 프로필에서 삭제할 수 있습니다.</p>
 
     <div class="actions">
       <button type="submit" class="btn btn-primary" id="upload-btn">저장</button>
@@ -1480,7 +1512,7 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
 <script>
 (() => {
   const OUT_W = {{ out_w }}, OUT_H = {{ out_h }}, RATIO = OUT_W / OUT_H, MIN_SIDE = {{ min_side }};
-  const MAX = 10 * 1024 * 1024, TYPES = ["image/jpeg", "image/png"];
+  const MAX = 10 * 1024 * 1024;
   const $ = (id) => document.getElementById(id);
   const reg = $("reg"), fileInput = $("file"), pick = $("pick"), snap = $("snap");
   const err = $("file-error"), drop = $("drop"), uploadBtn = $("upload-btn");
@@ -1513,13 +1545,38 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
   ["dragleave", "drop"].forEach((t) => drop.addEventListener(t, () => drop.classList.remove("over")));
   drop.addEventListener("drop", (e) => { e.preventDefault(); loadFile(e.dataTransfer.files[0]); });
 
-  function loadFile(f) {
+  let conversion = 0, controller = null, cropUrl = null;
+  async function loadFile(f) {
     pick.value = ""; snap.value = "";
     if (!f) return;
-    if (!TYPES.includes(f.type)) return showError("jpg 또는 png 사진만 올릴 수 있어요.");
+    const current = ++conversion;
+    controller?.abort();
+    controller = new AbortController();
+    fileInput.value = "";
+    setState("choose");
+    $("photo-status").textContent = "";
     if (f.size > MAX) return showError("사진이 너무 커요. 10MB 이하로 올려 주세요.");
     showError("");
-    startCrop(URL.createObjectURL(f));
+    $("photo-status").textContent = "사진을 준비하고 있어요…";
+    const form = new FormData(); form.append("file", f);
+    try {
+      const response = await fetch("/photos/normalize", {
+        method: "POST", body: form, credentials: "same-origin", signal: controller.signal
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(error.detail || "사진을 준비하지 못했어요. 다시 선택해 주세요.");
+      }
+      const blob = await response.blob();
+      if (current !== conversion) return;
+      if (cropUrl) URL.revokeObjectURL(cropUrl);
+      cropUrl = URL.createObjectURL(blob);
+      startCrop(cropUrl);
+    } catch (error) {
+      if (current === conversion && error.name !== "AbortError") showError(error.message);
+    } finally {
+      if (current === conversion) $("photo-status").textContent = "";
+    }
   }
 
   // ---- 자르기: 끌기·확대(막대·휠·두 손가락) -----------------------------
@@ -1527,15 +1584,18 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
   let bw = 0, bh = 0, base = 1, scale = 1, x = 0, y = 0;
   const pts = new Map();
 
-  function startCrop(url) {
+  function startCrop(url, sequence = conversion) {
     cropImg.onload = () => {
+      if (sequence !== conversion) return;
       if (Math.min(cropImg.naturalWidth, cropImg.naturalHeight) < MIN_SIDE) {
         setState("choose");
         return showError("사진이 너무 작아요. 더 크게 찍은 사진을 골라 주세요.");
       }
       setState("crop"); layout();
     };
-    cropImg.onerror = () => showError("사진을 열 수 없어요. 다른 사진을 골라 주세요.");
+    cropImg.onerror = () => {
+      if (sequence === conversion) showError("사진을 열 수 없어요. 다른 사진을 골라 주세요.");
+    };
     cropImg.src = url;
   }
   function layout() {
@@ -1695,15 +1755,15 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
         novalidate data-loading="사진 분석 중…" id="upload-form">
     <!-- 실제로 서버에 보내는 1:1 사진 (자르기·촬영 결과를 여기에 넣음) -->
     <input type="file" name="file" id="file" accept="image/jpeg" hidden>
-    <input type="file" id="pick" accept="image/jpeg,image/png" hidden>
-    <input type="file" id="snap" accept="image/jpeg,image/png" capture="environment" hidden>
+    <input type="file" id="pick" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif,.hif" hidden>
+    <input type="file" id="snap" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif,.hif" capture="environment" hidden>
 
     <section class="s-choose">
       <div class="drop{% if file_error %} invalid{% endif %}" id="drop">
         <div>
           <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9.3h16M4 14.7h16M9.3 4v16M14.7 4v16" opacity=".35"/></svg>
           <strong>옷 사진</strong>
-          <small>1:1 · jpg, png · 10MB 이하</small>
+          <small>1:1 · JPG, PNG, HEIC, HEIF · 10MB 이하</small>
           <div class="pick-btns">
             <button type="button" class="btn btn-primary" id="btn-camera">카메라로 찍기</button>
             <button type="button" class="btn btn-secondary" id="btn-album">앨범에서 고르기</button>
@@ -1740,6 +1800,7 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
       <button type="button" class="btn btn-secondary" id="redo">다시 찍기·고르기</button>
     </section>
 
+    <p id="photo-status" role="status" class="soft" aria-live="polite"></p>
     <p class="field-error" id="file-error" role="alert" {% if not file_error %}hidden{% endif %}>{{ file_error or "" }}</p>
 
     <p class="tips">한 장에 한 벌 · 바닥에 펼치거나 옷걸이에 걸어서 · 단순한 배경</p>
@@ -1815,7 +1876,7 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
       {% elif USE_MOCK %}
       <p class="auto soft">Mock 모드: 자동 분석 없이 기본값</p>
       {% else %}
-      <p class="auto soft">틀린 부분만 고쳐 주세요.</p>
+      <p class="auto soft">사진으로 색상·패턴·스타일·두께를 추정했어요. 틀린 부분은 고쳐 주세요.</p>
       {% endif %}
     </div>
 
@@ -1888,6 +1949,7 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
 
         <fieldset class="field">
           <legend>두께</legend>
+          <p class="soft">사진으로 추정한 보온도예요. 소재·안감에 따라 다를 수 있으니 직접 확인해 주세요.</p>
           <div class="chips">
             <label class="chip"><input type="radio" name="thermal_level" value="" {% if not form.thermal_level %}checked{% endif %}><span>모름</span></label>
             {% for lv in range(1, 6) %}

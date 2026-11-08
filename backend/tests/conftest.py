@@ -11,6 +11,8 @@ os.environ.update(
         "FITJANG_SKIP_DOTENV": "1",
         "WEATHER_PROVIDER": "manual",
         "VISION_PROVIDER": "mock",
+        "VISION_CLASSIFIER": "demo",
+        "VISION_SEGMENTATION": "flat",
         "RECOMMENDER_PROVIDER": "mock",
         "OPENAI_API_KEY": "",
         "LLM_API_KEY": "",

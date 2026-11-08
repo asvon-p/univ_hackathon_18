@@ -1,16 +1,16 @@
-"""팀원 B — Computer Vision.
+"""AITEEN 팀원 B: 사진 기반 의류 속성 추출.
 
-C(Backend)는 아래 extract() 함수만 호출합니다. 시그니처는 유지하고 내부를 교체하세요.
-무거운 모델 로딩은 함수 안이 아니라 모듈 최초 1회만 하도록 구현하는 것을 권장합니다.
+백엔드의 호출 규격은 유지합니다. pipeline.py만 교체해 정확도를 개선할 수 있습니다.
 """
 
-from shared.contracts import GarmentAttributes, VisionResult
+from shared.contracts import VisionResult
+
+from .pipeline import create_pipeline, warmup
+from .pipeline import extract as _extract
 
 
 def extract(image_path: str, garment_id: str) -> VisionResult:
-    """임시 구현: 항상 'unknown top' 을 반환. B 가 교체합니다."""
-    return VisionResult(
-        success=True,
-        attributes=GarmentAttributes(garment_id=garment_id, category="top"),
-        model_version="stub-0",
-    )
+    return _extract(image_path, garment_id)
+
+
+__all__ = ["extract", "warmup", "create_pipeline"]

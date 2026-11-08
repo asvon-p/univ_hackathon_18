@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     STORAGE_DELETE_RETRY_SECONDS: float = Field(default=30, ge=0)  # 0: 자동 재시도 비활성화
 
     VISION_PROVIDER: Literal["mock", "local"] = "mock"
+    VISION_CLASSIFIER: Literal["demo", "clip"] = "clip"
+    VISION_SEGMENTATION: Literal["off", "flat", "rembg"] = "rembg"
+    VISION_DEVICE: Literal["cpu", "auto", "cuda", "mps"] = "cpu"
+    VISION_DEMO_CATEGORY: Literal["top", "bottom", "outerwear", "shoes"] = "top"
     RECOMMENDER_PROVIDER: Literal["mock", "local", "openai"] = "mock"
     WEATHER_PROVIDER: Literal["manual", "open_meteo"] = "open_meteo"
     WEATHER_TIMEOUT_SEC: float = Field(default=3, gt=0, le=10)

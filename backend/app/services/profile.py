@@ -6,12 +6,15 @@ from backend.app.core.errors import AppError, ErrorCode
 from backend.app.db.models import User, UserProfile
 from backend.app.repositories.profiles import ProfileRepository
 from backend.app.schemas.profile import BODY_FIELDS, ProfilePatch, ProfileView
+from backend.app.services.body_photo import cleanup_photo, retire_body_photo
 from backend.app.services.user_lock import require_active_user
+from backend.app.storage.base import StoragePort
 
 
 class ProfileService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, storage: StoragePort | None = None):
         self.db = db
+        self.storage = storage
         self.profiles = ProfileRepository(db)
 
     def _owned(self, user: User, *, for_update: bool = False) -> UserProfile:
@@ -37,6 +40,11 @@ class ProfileService:
             disliked_colors=profile.disliked_colors,
             consent_body_info_at=consent,
             avatar_config=profile.avatar_config,
+            body_photo_updated_at=(
+                profile.body_photo_updated_at.replace(tzinfo=UTC)
+                if profile.body_photo_updated_at is not None and profile.body_photo_updated_at.tzinfo is None
+                else profile.body_photo_updated_at
+            ),
         )
 
     def get(self, user: User) -> ProfileView:
@@ -47,6 +55,7 @@ class ProfileService:
         profile = self._owned(user, for_update=True)
         values = body.model_dump(exclude_unset=True)
         consent = values.pop("consent_body_info", None)
+        retired_photo = None
         has_body_values = any(values.get(field) is not None for field in BODY_FIELDS)
         if has_body_values and (
             consent is False or (consent is not True and profile.consent_body_info_at is None)
@@ -59,6 +68,7 @@ class ProfileService:
         if consent is True and profile.consent_body_info_at is None:
             profile.consent_body_info_at = datetime.now(UTC)
         elif consent is False:
+            retired_photo = retire_body_photo(self.db, profile)
             profile.consent_body_info_at = None
             for field in BODY_FIELDS:
                 setattr(profile, field, None)
@@ -67,4 +77,7 @@ class ProfileService:
         for field, value in values.items():
             setattr(profile, field, value)
         self.db.commit()
-        return self._view(user, profile)
+        result = self._view(user, profile)
+        if self.storage is not None:
+            cleanup_photo(self.db, self.storage, retired_photo)
+        return result

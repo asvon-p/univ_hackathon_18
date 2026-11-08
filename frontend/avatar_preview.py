@@ -103,8 +103,12 @@ def _owner(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()[:20]
 
 
-def _key(token: str, items: dict, photo_version: str | None) -> tuple:
-    return (_owner(token), photo_version, *(items.get(s) or "" for s in ORDER))
+def _profile_owner(token: str, profile) -> str:
+    return getattr(profile, "user_id", None) or _owner(token)
+
+
+def _key(owner: str, items: dict, photo_version: str | None) -> tuple:
+    return (owner, photo_version, *(items.get(s) or "" for s in ORDER))
 
 
 def _find(key: tuple) -> TryOn | None:
@@ -120,7 +124,7 @@ def tryon_state(request: Request, items: dict, profile) -> dict | None:
     version = getattr(profile, "body_photo_updated_at", None)
     if not token or not version:
         return None
-    t = _find(_key(token, tryon_items(items), version))
+    t = _find(_key(_profile_owner(token, profile), tryon_items(items), version))
     return t.to_json() if t else None
 
 
@@ -150,7 +154,7 @@ async def tryon_start(
         return _json_error(409, "전신 사진을 먼저 올려 주세요.", need_photo=True)
 
     items = {"top": top, "bottom": bottom, "outerwear": outerwear}
-    key = _key(token, items, version)
+    key = _key(_profile_owner(token, profile), items, version)
     if t := _find(key):
         return t.to_json()
 
@@ -234,17 +238,26 @@ async def _run(t: TryOn, token: str) -> None:
         )
 
 
-def _mine(request: Request, tryon_id: str) -> TryOn | None:
+async def _mine(request: Request, tryon_id: str) -> TryOn | None:
     token = request.cookies.get(TOKEN_COOKIE)
     t = _TRYONS.get(tryon_id)
-    if not token or not t or t.owner != _owner(token):
+    if not token or not t:
+        return None
+    try:
+        profile = await auth.get_profile(token)
+    except ApiError:
+        return None
+    if t.owner != _profile_owner(token, profile):
+        return None
+    if profile.body_photo_updated_at != t.key[1]:
+        _TRYONS.pop(tryon_id, None)
         return None
     return t
 
 
 @router.get("/tryon/{tryon_id}")
 async def tryon_status(request: Request, tryon_id: str):
-    t = _mine(request, tryon_id)
+    t = await _mine(request, tryon_id)
     if not t:
         return _json_error(404, "착샷을 찾을 수 없어요. 다시 만들어 주세요.")
     return t.to_json()
@@ -252,10 +265,10 @@ async def tryon_status(request: Request, tryon_id: str):
 
 @router.get("/tryon/{tryon_id}/image")
 async def tryon_image(request: Request, tryon_id: str, download: int = 0):
-    t = _mine(request, tryon_id)
+    t = await _mine(request, tryon_id)
     if not t or not t.image:
         return Response(status_code=404)
-    headers = {"Cache-Control": "private, max-age=3600"}
+    headers = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
     if download:
         headers["Content-Disposition"] = 'attachment; filename="fitjang-tryon.png"'
     return Response(t.image, media_type="image/png", headers=headers)

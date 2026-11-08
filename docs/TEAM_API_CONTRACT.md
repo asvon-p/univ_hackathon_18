@@ -1,6 +1,6 @@
 # 상의·하의·아우터 통합 계약 (2026-11-08)
 
-현재 계약은 `shared/contracts.py` **2.0**, DB는 **0010**입니다. A의
+현재 계약은 `shared/contracts.py` **2.0**, DB는 **0011**입니다. A의
 `feat/recommendation-ranking@0ba94be`, D의 `feat/frontend@85ddedc`를 기준으로 맞췄습니다.
 기존 단계별 완료 기록보다 이 문서가 최신 계약입니다.
 자동 날씨 조회와 수동 입력 대체도 연결했습니다. 요청 예시·설정·최신 검증 결과는
@@ -66,9 +66,41 @@
    analysis_status를 보존해 분석 미완료 옷은 추천 가능 수에서 제외합니다.
 4. 프론트 timeout을 35초로 조정했습니다. 429 오류 메시지는 표시하며 Retry-After 기반 카운트다운 UI는 후속 항목입니다.
 5. `/weather` GET→기온 POST 흐름과 수동 기온 요청을 검증하고 날씨 UI에 Open-Meteo 출처 링크를 표시했습니다.
-6. **현재 범위 밖**: 전신 사진 `/users/me/body-photo`, GPU 착샷 결과의
-   탈퇴 후 캐시 무효화는 아직 연결되지 않았습니다. `body_photo_updated_at`은 현재 null입니다.
-   현재 가입 흐름에서는 전신 사진 단계를 기본으로 숨깁니다. 착샷은 별도 2D 서비스이며 3D 모델 생성은 아닙니다.
+6. 전신 사진 `/users/me/body-photo` API와 프로필의 `body_photo_updated_at`을 구현했습니다.
+   아래 계약을 참고하세요. 현재 시연 실행 설정은 전신 사진 UI와 GPU 착샷을 기본으로 숨깁니다.
+   GPU 착샷 서버 연결·결과 영속 저장·탈퇴 후 착샷 캐시 무효화는 후속 범위입니다.
+   착샷은 별도 2D 서비스이며 3D 모델 생성은 아닙니다.
+
+## 전신 사진 API (DB 0011)
+
+세 경로 모두 JWT에서 본인 ID를 결정합니다. 사용자 ID나 저장 경로를 입력받지 않습니다.
+사진 저장 전 `PATCH /api/v1/profile` 또는 `PUT /api/v1/users/me/profile`에
+`{"consent_body_info": true}`를 보내 명시적으로 동의해야 합니다. 기존 동의를 재사용합니다.
+
+| 요청 | 성공 응답 |
+|---|---|
+| `PUT /api/v1/users/me/body-photo` | multipart `file`, JPG/PNG/HEIC/HEIF 최대 기본 10MB → 200 `{body_photo_updated_at}` |
+| `GET /api/v1/users/me/body-photo` | 본인 사진 JPEG 바이트, `Cache-Control: private, no-store` |
+| `DELETE /api/v1/users/me/body-photo` | 204, 없는 사진의 반복 삭제도 204 |
+
+- `/profile`과 `/users/me/profile` 조회에 최신 `body_photo_updated_at`을 반환합니다.
+  등록 전·삭제 후·동의 철회 후에는 null입니다. 실제 저장 경로나 사진 ID는 공개하지 않습니다.
+- 미인증·탈퇴한 JWT는 401, 사진 없음은 404 `BODY_PHOTO_NOT_FOUND`, 동의 없음은
+  422 `BODY_INFO_CONSENT_REQUIRED`, 용량 초과는 413, 손상/지원하지 않는 이미지는 415입니다.
+- 실제 파일 내용을 검사하고 EXIF 메타데이터를 제거하며 JPEG로 재인코딩합니다.
+- 의류와 전신 사진 모두 HEIC/HEIF를 자동 표준화합니다. 원본 최대 6,400만 픽셀, 결과 긴 변 최대 2048px입니다.
+- 자르기 미리보기용 `POST /api/v1/images/normalize`는 동일한 입력을 받아 JPEG 바이트를 반환합니다.
+  로그인 필요, DB/파일 저장 없음, `private, no-store`. 프론트의 연결 경로는 `/photos/normalize`입니다.
+  프론트의 1080×1620 이미지는 그대로 처리할 수 있고 긴 변이 2048px보다 크면 축소합니다.
+- 교체는 새 UUID 파일에 저장한 뒤 DB 참조를 변경합니다. DB 커밋 실패 시 이전 사진이 유지됩니다.
+  새 파일을 쓰기 전 정리 작업을 먼저 DB에 기록해 업로드 실패·프로세스 중단 시에도 회수할 수 있습니다.
+- 삭제/교체/동의 철회는 DB 커밋 후 파일을 정리합니다. 파일 삭제가 실패해도 이전 사진 API 접근은
+  차단되고 작업 기록을 worker가 재시도합니다. 사용자 탈퇴는 모든 사진 버전·임시 파일을 함께 정리합니다.
+- 공개 `/media` 경로로 전신 사진을 제공하지 않습니다. 전신 사진 GET은 잠금 상태에서 바이트를 읽어
+  교체/삭제 중 파일 응답 경쟁을 피합니다. 원본 사진은 비전·추천·외부 GPU 서버에 자동 전송하지 않습니다.
+- `0011`은 기존 프로필에 nullable 사진 ID/시각을 추가하고 사진 정리 작업 테이블을 만듭니다.
+  기존 데이터는 보존하며 사진 또는 미처리 정리 작업이 있으면 손실 방지를 위해 downgrade를 거부합니다.
+- 팀원 `frontend/connect/auth_profile.py`의 upload/fetch/delete 호출을 실제 PostgreSQL HTTP E2E로 검증합니다.
 
 ## GPT-6 Luna 구성
 

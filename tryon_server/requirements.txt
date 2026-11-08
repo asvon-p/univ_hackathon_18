@@ -1,0 +1,6 @@
+# Install CUDA torch separately (see docs/LOCAL_TRYON.md).
+fastapi>=0.110,<1
+uvicorn>=0.29,<1
+python-multipart>=0.0.9
+onnxruntime-gpu>=1.20,<1.24
+pillow>=10
