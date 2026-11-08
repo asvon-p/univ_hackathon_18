@@ -1,12 +1,24 @@
+# Web
 fastapi>=0.115
 uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+# Settings / schema
 pydantic>=2.7
 pydantic-settings>=2.3
+# DB
 sqlalchemy>=2.0
 psycopg[binary]>=3.2
 alembic>=1.13
-python-multipart>=0.0.9
+pgvector>=0.3
+# Auth
 pyjwt>=2.8
-passlib[bcrypt]>=1.7
+bcrypt>=4.1
+email-validator>=2.2
+# Image
+pillow>=10.3
+# HTTP client (OpenAI Responses adapter) / tests
 httpx>=0.27
+# Dev / test
 pytest>=8.0
+ruff>=0.5
+# NOTE: torch 는 여기에 넣지 않습니다. vision/README.md 참고 (RTX 5090 = cu128).

@@ -1,9 +1,8 @@
-"""팀원 A — Recommendation Engine.
+"""A의 rules/ranking 결과를 공통 계약으로 변환합니다 (원본 브랜치: 0ba94be)."""
 
-C(Backend)는 아래 recommend() 함수만 호출합니다. 함수 시그니처는 바꾸지 말고,
-내부 구현(규칙 필터, 후보 생성, LLM 평가)을 자유롭게 교체하세요.
-"""
+from recommendation.ranking import recommend_top3
 from shared.contracts import (
+    RECOMMENDATION_CATEGORIES,
     GarmentAttributes,
     Outfit,
     OutfitItems,
@@ -13,16 +12,32 @@ from shared.contracts import (
 
 
 def recommend(context: UserContext, garments: list[GarmentAttributes]) -> RecommendationResult:
-    """임시 구현: 카테고리별 첫 번째 사용 가능한 옷으로 1벌 조합. A 가 교체합니다."""
-    usable = [g for g in garments if g.status == "available" and g.garment_id not in context.excluded_items]
-    pick = {c: next((g.garment_id for g in usable if g.category == c), None)
-            for c in ("top", "bottom", "shoes", "outerwear")}
+    usable = [
+        g
+        for g in garments
+        if g.status == "available"
+        and g.garment_id not in context.excluded_items
+        and g.category in RECOMMENDATION_CATEGORIES
+    ]
+    by_id = {g.garment_id: g for g in usable}
     outfits = []
-    if pick["top"] and pick["bottom"] and pick["shoes"]:
-        outfits.append(Outfit(
-            outfit_id="O001",
-            items=OutfitItems(top=pick["top"], bottom=pick["bottom"], shoes=pick["shoes"],
-                              outerwear=pick["outerwear"] if context.temperature_c < 15 else None),
-            reason="(stub) 사용 가능한 옷으로 만든 기본 조합",
-        ))
-    return RecommendationResult(recommendation_id="R-stub", outfits=outfits)
+    for rank, row in enumerate(recommend_top3(usable, context), start=1):
+        items = OutfitItems(top=row["top"], bottom=row["bottom"], outerwear=row.get("outerwear"))
+        tags = list(
+            dict.fromkeys(
+                tag
+                for gid in (items.top, items.bottom, items.outerwear)
+                if gid
+                for tag in by_id[gid].style_candidates
+            )
+        )
+        outfits.append(
+            Outfit(
+                outfit_id=f"rule-{rank}",
+                items=items,
+                style_tags=tags,
+                score=float(row["score"]),
+                reason=f"{context.temperature_c:g}°C 날씨 필터와 색상·상황 점수 기준 조합",
+            )
+        )
+    return RecommendationResult(recommendation_id="rules", outfits=outfits)

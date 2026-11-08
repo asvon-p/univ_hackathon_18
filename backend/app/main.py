@@ -1,62 +1,90 @@
-"""팀원 C — FastAPI 진입점.
+"""FastAPI 진입점 (팀원 C).
 
-실행 (저장소 루트에서): uvicorn backend.app.main:app --reload
-API 문서: http://localhost:8000/docs  ← D 는 여기서 요청/응답 형식을 확인합니다.
+실행 (저장소 루트에서): .\\scripts\\dev.ps1 run   또는   uvicorn backend.app.main:app --reload
+API 문서: http://localhost:8000/docs
 """
-import json
-from pathlib import Path
 
-from fastapi import FastAPI, UploadFile
+import asyncio
+import logging
+import os
+from contextlib import asynccontextmanager, suppress
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-import recommendation
-import vision
-from shared.contracts import (
-    FeedbackEvent,
-    GarmentAttributes,
-    RecommendationResult,
-    UserContext,
-)
+from backend.app.adapters import registry
+from backend.app.api.v1 import auth, garments, health, media, profile, recommendations, weather
+from backend.app.core.config import get_settings
+from backend.app.core.errors import register_exception_handlers
+from backend.app.core.logging import setup_logging
+from backend.app.storage.worker import retry_deletions
+from shared.contracts import CONTRACT_VERSION
 
-MOCKS = Path(__file__).resolve().parents[2] / "mocks"
-
-app = FastAPI(title="Fitjang API", version="0.1.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+log = logging.getLogger("fitjang")
 
 
-def _mock_garments() -> list[GarmentAttributes]:
-    data = json.loads((MOCKS / "garments.json").read_text(encoding="utf-8"))
-    return [GarmentAttributes(**g) for g in data]
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    s = get_settings()
+    # A·B 코드는 os.environ 으로 키를 읽습니다 (.env → 환경변수로 전달)
+    for key in ("LLM_API_KEY", "WEATHER_API_KEY"):
+        if getattr(s, key) and not os.environ.get(key):
+            os.environ[key] = getattr(s, key)
+    registry.warmup_all()
+    log.info(
+        "started env=%s vision=%s recommender=%s contract=%s",
+        s.APP_ENV,
+        s.VISION_PROVIDER,
+        s.RECOMMENDER_PROVIDER,
+        CONTRACT_VERSION,
+    )
+    cleanup_task = (
+        asyncio.create_task(retry_deletions(s.STORAGE_DELETE_RETRY_SECONDS))
+        if s.STORAGE_DELETE_RETRY_SECONDS > 0
+        else None
+    )
+    try:
+        yield
+    finally:
+        if cleanup_task is not None:
+            cleanup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cleanup_task
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+def create_app() -> FastAPI:
+    s = get_settings()
+    s.validate_auth()
+    setup_logging(s.LOG_LEVEL)
+    app = FastAPI(title="Fitjang API", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=s.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["Retry-After"],
+    )
+    register_exception_handlers(app)
+
+    app.include_router(health.router)
+    app.include_router(auth.router)
+    app.include_router(profile.router)
+    app.include_router(profile.frontend_router)
+    app.include_router(garments.router)
+    app.include_router(media.router)
+    app.include_router(recommendations.router)
+    app.include_router(weather.router)
+
+    # 시연 시: 프론트 빌드 결과를 같은 주소(/)에서 제공 → 터널 1개, CORS 불필요
+    # 반드시 API 라우터 등록 뒤에 마운트해야 /api 경로가 가려지지 않습니다.
+    if s.SERVE_FRONTEND:
+        if s.FRONTEND_DIST.is_dir():
+            app.mount("/", StaticFiles(directory=s.FRONTEND_DIST, html=True), name="frontend")
+        else:
+            log.warning("SERVE_FRONTEND=true 이지만 %s 가 없습니다", s.FRONTEND_DIST)
+    return app
 
 
-# ---- 아래는 DB 연동 전 Mock 엔드포인트. feat/* 브랜치에서 실제 구현으로 교체 ----
-
-@app.get("/api/v1/garments", response_model=list[GarmentAttributes])
-def list_garments():
-    return _mock_garments()
-
-
-@app.post("/api/v1/garments", response_model=GarmentAttributes)
-async def upload_garment(file: UploadFile):
-    result = vision.extract(image_path=file.filename or "", garment_id="G-new")
-    return result.attributes
-
-
-@app.post("/api/v1/recommendations", response_model=RecommendationResult)
-def create_recommendation(context: UserContext):
-    return recommendation.recommend(context, _mock_garments())
-
-
-@app.post("/api/v1/recommendations/{recommendation_id}/feedback")
-def save_feedback(recommendation_id: str, event: FeedbackEvent):
-    return {"saved": True, "recommendation_id": recommendation_id}
+app = create_app()

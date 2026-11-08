@@ -1,0 +1,15 @@
+# 팀 공통 Python 환경 (conda)
+#   생성:   conda env create -f environment.yml
+#   갱신:   conda env update -f environment.yml --prune
+#   활성화: conda activate univ18
+# Python 버전은 conda 가, 라이브러리는 pip + requirements.txt 가 관리합니다.
+# A·B 전용 requirements.txt 를 만들면 아래 pip 목록에 한 줄씩 추가하세요.
+name: univ18
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12.14
+  - pip
+  - pip:
+      - -r backend/requirements.txt
+      - -r frontend/requirements.txt

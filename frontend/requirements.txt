@@ -1,0 +1,7 @@
+# 프론트엔드(D) — FastAPI + Jinja2 화면 서버
+# backend/requirements.txt 와 같은 conda 환경(univ18)에 설치합니다.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+jinja2>=3.1.6,<4
+httpx>=0.27
+python-multipart>=0.0.9

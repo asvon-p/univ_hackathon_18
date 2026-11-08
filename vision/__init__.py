@@ -3,6 +3,7 @@
 C(Backend)는 아래 extract() 함수만 호출합니다. 시그니처는 유지하고 내부를 교체하세요.
 무거운 모델 로딩은 함수 안이 아니라 모듈 최초 1회만 하도록 구현하는 것을 권장합니다.
 """
+
 from shared.contracts import GarmentAttributes, VisionResult
 
 
