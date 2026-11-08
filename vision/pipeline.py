@@ -96,9 +96,8 @@ def _predict(image: Image.Image) -> tuple[str, str | None, str]:
         return category, None, "demo-manual-category"
     if mode != "clip":
         raise ValueError(f"unsupported VISION_CLASSIFIER: {mode}")
-    import torch
-
     model, processor, device = _clip_model()
+    import torch
     prompts = list(_PROMPTS)
     tensors = processor(text=prompts, images=image.convert("RGB"), return_tensors="pt", padding=True)
     tensors = {k: v.to(device) for k, v in tensors.items()}
