@@ -28,6 +28,7 @@ def deny_dotenv(event, args):
 def persistent_jwt_secret() -> str:
     """Reuse the local signing key so restarting does not invalidate existing sessions."""
     path = STATE / "credentials.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         with path.open("x", encoding="utf-8") as stream:
             json.dump({"jwt_secret": secrets.token_urlsafe(48)}, stream)
@@ -46,6 +47,7 @@ def main():
     parser.add_argument("--backend-port", type=int, default=8002)
     parser.add_argument("--weather", choices=["open_meteo", "manual"], default="open_meteo")
     parser.add_argument("--tryon", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--recommender", choices=["auto", "local", "openai"], default="auto")
     args = parser.parse_args()
     STATE.mkdir(parents=True, exist_ok=True)
     if args.stop:
@@ -55,18 +57,18 @@ def main():
     for port in (args.frontend_port, args.backend_port):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", port))
+    from scripts.recommendation_runtime import frontend_environment, recommendation_environment
+
+    judge_env = recommendation_environment(args.recommender)
     os.environ.update(
         FITJANG_SKIP_DOTENV="1",
         APP_ENV="test",
         JWT_SECRET=persistent_jwt_secret(),
         VISION_PROVIDER="local",
-        RECOMMENDER_PROVIDER="local",
         WEATHER_PROVIDER=args.weather,
         WEATHER_TIMEOUT_SEC="5",
         WEATHER_CACHE_TTL_SEC="300",
-        SIGNUP_INVITE_CODE="",
-        OPENAI_API_KEY="",
-        LLM_API_KEY="",
+        NEW_USER_PHOTO_POLICY="persistent",
         WEATHER_API_KEY="",
         SERVE_FRONTEND="false",
         STORAGE_DELETE_RETRY_SECONDS="30",
@@ -77,12 +79,15 @@ def main():
         TRYON_API_URL="",
         TRYON_API_KEY="",
     )
+    os.environ.update(frontend_environment(judge_env))
+    print("Recommendation provider: " + judge_env["RECOMMENDER_PROVIDER"], flush=True)
     import httpx
     from alembic import command
     from alembic.config import Config
-    from sqlalchemy import create_engine, text
+    from sqlalchemy import text
     from sqlalchemy.engine import make_url
 
+    from backend.app.db.engine import create_database_engine as create_engine
     from scripts.demo_assets import CATALOG, garment_images
 
     # Public development fixture credentials only. Never resolve a URL from dotenv.
@@ -93,6 +98,7 @@ def main():
     run_dir.mkdir(exist_ok=True)
     env = {
         **os.environ,
+        **judge_env,
         "TEST_DATABASE_URL": url.update_query_dict({"options": f"-csearch_path={schema}"}).render_as_string(
             hide_password=False
         ),
@@ -106,53 +112,25 @@ def main():
     processes, logs = [], []
     tryon_managed = False
     try:
-        from scripts.local_tryon import CREDENTIALS, PORT, runtime_environment
+        from scripts.local_tryon import CREDENTIALS, runtime_environment
 
         use_tryon = args.tryon if args.tryon is not None else CREDENTIALS.exists()
         if use_tryon:
-            gpu_python, gpu_env = runtime_environment()
-            env.update({key: gpu_env[key] for key in ("TRYON_API_URL", "TRYON_API_KEY")})
-            with httpx.Client(trust_env=False) as client:
-                gpu = None
-                try:
-                    response = client.get(f"http://127.0.0.1:{PORT}/health", timeout=2)
-                    response.raise_for_status()
-                except httpx.ConnectError:
-                    with socket.socket() as probe:
-                        probe.bind(("127.0.0.1", PORT))
-                    log = (run_dir / "tryon.log").open("w", encoding="utf-8")
-                    logs.append(log)
-                    gpu = subprocess.Popen(
-                        [str(gpu_python), "-m", "scripts.local_tryon"],
-                        cwd=ROOT,
-                        env={**env, **gpu_env},
-                        stdout=log,
-                        stderr=subprocess.STDOUT,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            from scripts.tryon_control import ensure_running
+
+            _, gpu_env = runtime_environment()
+            env.update(
+                {
+                    key: gpu_env[key]
+                    for key in (
+                        "TRYON_API_URL",
+                        "TRYON_API_KEY",
+                        "TRYON_MAINTENANCE_FILE",
                     )
-                    processes.append(gpu)
-                    tryon_managed = True
-                    print("Loading local GPU model; see persistent/tryon.log", flush=True)
-                deadline = time.monotonic() + 600
-                while time.monotonic() < deadline:
-                    if gpu is not None and gpu.poll() is not None:
-                        raise RuntimeError("GPU server exited; see persistent/tryon.log")
-                    try:
-                        health = client.get(f"http://127.0.0.1:{PORT}/health", timeout=2).json()
-                        if health["status"] == "ok":
-                            client.get(
-                                f"http://127.0.0.1:{PORT}/jobs",
-                                headers={"x-api-key": gpu_env["TRYON_API_KEY"]},
-                            ).raise_for_status()
-                            print("GPU ready: " + health["gpu"], flush=True)
-                            break
-                        if health["status"] == "error":
-                            raise RuntimeError("GPU model failed to load; see persistent/tryon.log")
-                    except httpx.RequestError:
-                        pass
-                    time.sleep(1)
-                else:
-                    raise RuntimeError("GPU model readiness timeout")
+                }
+            )
+            state = ensure_running()
+            print("GPU service: " + state["phase"], flush=True)
         with engine.begin() as conn:
             conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
             conn.execute(text(f'SET LOCAL search_path TO "{schema}"'))
@@ -168,7 +146,7 @@ def main():
             process = subprocess.Popen(
                 [sys.executable, "-m", "scripts.preview_server", app, str(port)],
                 cwd=ROOT,
-                env=env,
+                env=env if name == "backend" else frontend_environment(env),
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
@@ -194,6 +172,8 @@ def main():
             "backend_url": f"http://127.0.0.1:{args.backend_port}",
             "run_dir": str(run_dir),
             "weather": args.weather,
+            "recommender": judge_env["RECOMMENDER_PROVIDER"],
+            "judgment_model": judge_env["OPENAI_MODEL"],
             "tryon": use_tryon,
             "tryon_managed": tryon_managed,
             "manager_pid": os.getpid(),

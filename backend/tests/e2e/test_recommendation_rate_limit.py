@@ -20,7 +20,7 @@ def test_concurrent_http_requests_and_separate_process_share_persistent_user_quo
         credentials = {"email": f"limit-{uuid4().hex}@example.com", "password": "e2e-only-password-123"}
         signup = client.post(
             "/api/v1/auth/signup",
-            json={**credentials, "nickname": "limit", "invite_code": "e2e-invite-only"},
+            json={**credentials, "nickname": "limit"},
         )
         assert signup.status_code == 201
         login = client.post("/api/v1/auth/login", json=credentials)
@@ -46,7 +46,12 @@ def test_concurrent_http_requests_and_separate_process_share_persistent_user_quo
 
     with ThreadPoolExecutor(max_workers=12) as executor:
         responses = list(
-            executor.map(lambda _: client.post(path, headers=headers, json={"temperature_c": 5}), range(20))
+            executor.map(
+                lambda _: client.post(
+                    path, headers={**headers, "Idempotency-Key": str(uuid4())}, json={"temperature_c": 5}
+                ),
+                range(20),
+            )
         )
     assert sorted(response.status_code for response in responses) == [201] * 10 + [429] * 10
     for response in responses:

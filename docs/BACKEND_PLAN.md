@@ -163,7 +163,6 @@ univ_hackathon_18/
 | `LLM_API_KEY`, `WEATHER_API_KEY` | – | 서버 설정. Open-Meteo는 WEATHER_API_KEY를 사용하지 않음 |
 | `CORS_ORIGINS` | `http://localhost:5173` | 개발 중 프론트 서버 |
 | `SERVE_FRONTEND` | `false` | `true`면 `frontend/dist`를 `/`에서 제공 |
-| `SIGNUP_INVITE_CODE` | 비어 있음 | 값이 있으면 이 코드가 있어야 가입 가능 (시연 공개 시) |
 
 ### 3.3 명령 모음 (`scripts/dev.ps1`)
 ```powershell
@@ -390,7 +389,7 @@ ORM과 계약 사이 변환은 이 파일에 모읍니다. 계약에 속성을 �
 | Method | Path | 인증 | 설명 | 우선순위 |
 |---|---|---|---|---|
 | GET | `/health` | – | 서버·DB·어댑터 상태 | P0 |
-| POST | `/api/v1/auth/signup` | – | 회원가입 (초대 코드 선택) | P0 |
+| POST | `/api/v1/auth/signup` | – | 이메일·비밀번호 회원가입 | P0 |
 | POST | `/api/v1/auth/login` | – | JWT 발급 | P0 |
 | GET | `/api/v1/auth/me` | ✔ | 내 정보 | P0 |
 | DELETE | `/api/v1/auth/me` | ✔ | 본인 탈퇴·데이터 삭제·피드백 익명화·이미지 정리. 성공 204 | 구현 완료 |
@@ -399,7 +398,7 @@ ORM과 계약 사이 변환은 이 파일에 모읍니다. 계약에 속성을 �
 | POST | `/api/v1/garments` | ✔ | 사진 업로드 → 분석 → 저장 (multipart) | P0 |
 | GET | `/api/v1/garments` | ✔ | 옷장 목록 (`?category=&status=`) | P0 |
 | GET | `/api/v1/garments/{id}` | ✔ | 단건 | P0 |
-| GET | `/api/v1/garments/{id}/image` | ✔ | kind=cutout/original, 미생성 cutout은 원본 대체 | 구현 완료 |
+| GET | `/api/v1/garments/{id}/image` | ✔ | kind=cutout/original/thumbnail, 썸네일 최대 384px WebP·본인 접근 제한, 원본 보존 | 구현 완료 |
 | PATCH | `/api/v1/garments/{id}` | ✔ | 속성 수정, 세탁 중 표시 | P0 |
 | DELETE | `/api/v1/garments/{id}` | ✔ | 삭제 (이미지 포함) | P0 |
 | POST | `/api/v1/garments/{id}/reanalyze` | ✔ | 원본 재분석, 수동 수정 필드 보존. 성공/분석 실패 모두 200 + 상태 | P1 |
@@ -442,7 +441,6 @@ ORM과 계약 사이 변환은 이 파일에 모읍니다. 계약에 속성을 �
 | `AUTH_INVALID_TOKEN` | 401 | 위조·잘못된 토큰, 없는 사용자·비활성 계정 |
 | `BODY_INFO_CONSENT_REQUIRED` | 422 | 신체정보·아바타 저장 전 동의 누락 |
 | `EMAIL_ALREADY_EXISTS` | 409 | 중복 가입 |
-| `INVITE_CODE_INVALID` | 403 | 초대 코드 오류 |
 | `GARMENT_NOT_FOUND` | 404 | 없거나 남의 옷 |
 | `GARMENT_IMAGE_NOT_FOUND` | 404 | 재분석할 원본 파일이 없거나 읽을 수 없음 |
 | `GARMENT_BUSY` | 409 | 같은 의류가 재분석/수정/삭제 처리 중. 잠시 후 재시도 |
@@ -544,7 +542,7 @@ class StoragePort(Protocol):
 | 소유권 | Repository의 모든 조회에 `user_id` 조건, 남의 데이터는 404 |
 | 업로드 | 크기 제한, 실제 이미지 판별, 재인코딩 저장(악성 파일·메타데이터 제거, EXIF 위치 정보 삭제) |
 | 비밀 정보 | `.env`에만, 로그에 키·토큰·비밀번호 출력 금지 |
-| 외부 공개(터널) | 초대 코드·DB loopback 바인딩·로그인 사용자별 추천 최근 60초 10회 제한 구현. 초과 시 429 + Retry-After |
+| 외부 공개(터널) | 공개 회원가입·DB loopback 바인딩·로그인 사용자별 추천 최근 60초 10회 제한 구현. 초과 시 429 + Retry-After. 공개 경로 보호는 PUBLIC_DEMO_SECURITY.md 참고 |
 | CORS | 개발 중 프론트 주소만 허용, 시연 시에는 같은 주소라 불필요 |
 | 민감 정보 | 신체 정보 동의/철회, 탈퇴 시 계정·프로필·옷장·추천 삭제 및 피드백 참조·사유 익명화. 사용자 폴더 정리는 커밋 후 실행·실패 시 영속 재시도 |
 
@@ -630,12 +628,12 @@ Remove-Item Env:TEST_POSTGRES
 
 ### 단계 2 — `feat/auth-profile` (P0로 앞당김 권장)
 - [x] 가입·로그인·`/me`, JWT, `get_current_user`
-- [x] `user_profiles`, 프로필 API, 초대 코드
+- [x] `user_profiles`, 프로필 API, 이메일·비밀번호 가입 (초대 코드 기능은 2026-11-11 제거)
 - [x] 모든 보호 대상 API에 인증·소유권 적용 + 차단 테스트
 - **완료 기준:** 사용자 A가 사용자 B의 옷·이미지·추천에 접근 불가 (테스트로 증명)
 
 **단계 2 구현 사항 / 사용 방법**
-- `POST /api/v1/auth/signup`: JSON `{email, password, nickname, invite_code?}` → 사용자 정보 (201). 이메일은 공백 제거·소문자로 저장하고 중복 가입은 409입니다. `SIGNUP_INVITE_CODE` 설정 시 코드가 일치해야 가입할 수 있습니다(불일치 403).
+- `POST /api/v1/auth/signup`: JSON `{email, password, nickname?}` → 사용자 정보·JWT (201). 이메일은 공백 제거·소문자로 저장하고 중복 가입은 409입니다. 초대 코드 기능은 제거했으며 이전 `invite_code` 필드는 422입니다. 기존 계정·프로필 변경이나 DB 마이그레이션은 필요 없습니다.
 - `POST /api/v1/auth/login`: JSON `{email, password}` → `{access_token, token_type: "bearer", expires_in: 86400}`. 비밀번호는 bcrypt cost 12로 저장하며 JWT는 HS256, 기본 유효기간 24시간입니다.
 - `GET /api/v1/auth/me`: 현재 사용자 정보. `Authorization: Bearer <token>`이 필요하며 매 요청마다 서명·만료·토큰 종류·사용자 존재·활성 상태를 확인합니다. 로그인 토큰에는 사용자 ID와 발급/만료 시각·토큰 종류만 담습니다.
 - 옷장·이미지·프로필·추천·피드백 요청 모두 인증이 필요합니다. 토큰 누락·위조·만료·비활성 계정은 401, 다른 사용자의 옷·이미지 조회/수정/삭제는 404입니다. 프로필은 `/profile`에서 토큰 사용자 본인만 조회·수정합니다.
@@ -794,7 +792,7 @@ Remove-Item Env:TEST_POSTGRES
 3. **A의 개인화 알고리즘** — 계약 1.1의 `recent_feedback`은 전달 완료, 점수 반영과 추가 속성 협의
 4. **기온 입력 방식** — 자동 조회·수동 대체 구현 완료. D 위치 권한/수동 입력 화면과 Open-Meteo 출처 표시 확인
 5. **비전 동기 처리 유지 여부** — 데스크탑 실측 후 결정 (5초 기준)
-6. **시연 시 공개 범위** — 초대 코드 사용 여부, 멘토 계정 수
+6. **시연 시 공개 범위** — 이메일·비밀번호로 직접 가입 (초대 코드 제거), 사용자별 데이터 분리 유지
 7. **D의 아바타/3D 계약** — `avatar_config` 구조·버전, 에셋 식별자와 제공 방식, 별도 생성/업로드 API 필요 여부. 현재 16KB 이하 JSON 저장만 제공
 8. **D의 라우팅 방식** — hash 또는 URL 경로 라우팅. 후자는 SPA 새로고침/직접 링크 처리 필요
 9. **실제 모델 테스트 입력과 실행 조건** — 실제 사진·정답/추천 품질 사례, 모델·외부 호출이 필요한 테스트를 일반 PR 검증과 어떻게 구분할지 합의

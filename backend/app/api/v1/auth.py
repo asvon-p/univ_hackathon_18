@@ -22,9 +22,10 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
 def get_auth_service(
-    db: Session = Depends(get_db), settings: Settings = Depends(get_settings)
+    db: Session = Depends(get_db), settings: Settings = Depends(get_settings),
+    storage: StoragePort = Depends(get_storage),
 ) -> AuthService:
-    return AuthService(db, settings)
+    return AuthService(db, settings, storage)
 
 
 @router.post("/signup", response_model=SignupResponse, status_code=201)
@@ -44,6 +45,24 @@ def login(body: LoginRequest, response: Response, service: AuthService = Depends
 @router.get("/me", response_model=UserView)
 def me(user: User = Depends(get_current_user)):
     return UserView.model_validate(user)
+
+
+@router.post("/activity", status_code=204)
+def activity(user=Depends(get_current_user), db=Depends(get_db)):
+    if user.photo_policy == "session":
+        from backend.app.services.media_session import activity as touch
+
+        touch(db, user.id, user._photo_session_key)
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/logout", status_code=204)
+def logout(user=Depends(get_current_user), db=Depends(get_db)):
+    if user.photo_policy == "session":
+        from backend.app.services.media_session import logout as end
+
+        end(db, user.id, user._photo_session_key)
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
 def get_account_service(

@@ -4,20 +4,22 @@
 - recommend(token, UserContext) → RecommendationResult   ↔ A feat/recommendation-rules·ranking (백엔드 C 경유)
 - send_feedback(token, FeedbackEvent)                    ↔ A+C feat/recommendation-feedback
 
-화면 흐름: /recommend (조건 고르기) → /recommend/result?... (코디 최대 3개, GET이라 새로고침·뒤로 가기 가능)
+화면 흐름: GET /recommend → POST /recommend (생성) → GET /recommend/result/{id} (조회)
 """
 
 from __future__ import annotations
 
 import re
-import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
+from urllib.parse import urlencode
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from shared.contracts import FeedbackEvent, UserContext
+from shared.day_plans import ENVIRONMENT_LABELS, PURPOSE_LABELS
 
 from .common import (
     CATEGORY_ORDER,
@@ -34,6 +36,8 @@ from .connect import auth_profile as auth
 from .connect import garment_storage as closet
 from .connect import recommendation as rec
 from .connect import weather as weather_api
+from .day_plans import list_plans
+from .style_references import list_references
 
 router = APIRouter()
 
@@ -104,8 +108,6 @@ async def wearable_garments(token: str):
 # ---- 0) 홈: 오늘 날짜·기온 + 오늘의 코디 + 내 옷장 요약 --------------------------
 LOC_COOKIE = "fitjang_loc"  # 브라우저 위치 "37.57,126.98"(소수 둘째 자리까지) 또는 "none"(거부)
 WEEKDAYS = "월화수목금토일"
-_HOME_CACHE: dict[tuple, tuple[float, object]] = {}  # 같은 조건이면 오늘의 코디를 다시 안 부름
-HOME_CACHE_SEC = 60 * 60
 
 
 def home_location(request: Request) -> tuple[float, float, bool]:
@@ -120,21 +122,14 @@ def home_location(request: Request) -> tuple[float, float, bool]:
     return round(weather_api.SEOUL[0], 2), round(weather_api.SEOUL[1], 2), True
 
 
-async def todays_outfit(token: str, temperature: float, usable) -> object | None:
-    """오늘의 코디 1개 (추천 결과의 첫 번째). 한 시간 동안은 같은 결과를 보여줌."""
-    key = (token, round(temperature), tuple(sorted(g.garment_id for g in usable)))
-    hit = _HOME_CACHE.get(key)
-    if hit and time.monotonic() - hit[0] < HOME_CACHE_SEC:
-        return hit[1]
-    result = await rec.recommend(
-        token,
-        UserContext(user_id="me", temperature_c=temperature),  # TODO(C): 토큰에서 사용자
-    )
-    outfit = result.outfits[0] if result.outfits else None
-    if len(_HOME_CACHE) > 200:
-        _HOME_CACHE.clear()
-    _HOME_CACHE[key] = (time.monotonic(), outfit)
-    return outfit
+async def latest_outfit(token: str, usable) -> object | None:
+    """홈도 읽기 전용입니다. 현재 입을 수 있는 옷으로 저장된 최근 코디만 표시합니다."""
+    available = {g.garment_id for g in usable}
+    for result in await rec.recent_results(token):
+        for outfit in result.outfits:
+            if {v for v in outfit.items.model_dump().values() if v} <= available:
+                return outfit
+    return None
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -157,18 +152,20 @@ async def home(request: Request):
             return logged_out()
         garments, usable, counts = [], [], {c: 0 for c, _ in SLOTS}
     missing = [c for c in NEEDED if counts[c] == 0]
+    try:
+        profile = await auth.get_profile(token)  # 선호 스타일과 착샷 전신 사진 유무
+    except ApiError as e:
+        if e.status == 401:
+            return logged_out()
+        profile = None
     outfit, outfit_error = None, None
-    if weather and not missing:
+    if not missing:
         try:
-            outfit = await todays_outfit(token, weather.temperature_c, usable)
+            outfit = await latest_outfit(token, usable)
         except ApiError as e:
             if e.status == 401:
                 return logged_out()
             outfit_error = e.message
-    try:
-        profile = await auth.get_profile(token)  # 착샷(전신 사진 유무)용
-    except ApiError:
-        profile = None
     place = (weather.location_name if weather else None) or ("서울" if is_fallback else "현재 위치")
     return render(
         request,
@@ -191,13 +188,40 @@ async def home(request: Request):
 
 
 # ---- 1) 조건 고르기 ------------------------------------------------------------
+def required_selection_error(required: list[str], usable) -> str | None:
+    if len(required) > 3 or len(required) != len(set(required)):
+        return "필수 의류는 중복 없이 최대 세 벌까지 선택해 주세요."
+    by_id = {g.garment_id: g for g in usable}
+    if any(gid not in by_id for gid in required):
+        return "선택한 옷을 사용할 수 없어요. 아래에서 필수 의류를 다시 선택해 주세요."
+    categories = [by_id[gid].category for gid in required]
+    if len(categories) != len(set(categories)):
+        return "상의·하의·아우터에서 각각 한 벌만 선택해 주세요."
+    return None
+
+
 @router.get("/recommend", response_class=HTMLResponse)
-async def recommend_page(request: Request):
+async def recommend_page(
+    request: Request,
+    temp: str = "",
+    occasion: str = "",
+    styles: Annotated[list[str] | None, Query()] = None,
+    style_text: str = "",
+    required: Annotated[list[str] | None, Query()] = None,
+    exclude: Annotated[list[str] | None, Query()] = None,
+    schedule_id: str = "",
+    schedule_version: str = "",
+    outerwear_policy: str = "always_worn",
+    reference_id: str = "",
+    reference_version: str = "",
+):
     token = request.cookies.get(TOKEN_COOKIE)
     if not token:
         return go_login(request)
     try:
         _, usable, counts = await wearable_garments(token)
+        plans = await list_plans(token)
+        refs = await list_references(token)
     except ApiError as e:
         if e.status == 401:
             return logged_out()
@@ -213,6 +237,8 @@ async def recommend_page(request: Request):
             form={},
         )
     missing = [c for c in NEEDED if counts[c] == 0]
+    selected = [gid for gid in (required or []) if gid]
+    selection_error = required_selection_error(selected, usable)
     return render(
         request,
         "recommend_form.html",
@@ -220,8 +246,24 @@ async def recommend_page(request: Request):
         usable=usable,
         counts=counts,
         missing=missing,
-        form={"temp": "", "styles": [], "style_text": "", "exclude": []},
-        autofill=True,  # 처음 열 때만 오늘 기온 자동 입력
+        status=422 if selection_error else 200,
+        form={
+            "temp": temp,
+            "occasion": occasion,
+            "styles": styles or [],
+            "style_text": style_text[:MAX_STYLE_TEXT],
+            "exclude": exclude or [],
+            "required": selected,
+        },
+        errors={"required": selection_error} if selection_error else {},
+        autofill=not temp,
+        refs=refs,
+        reference_id=reference_id,
+        reference_version=reference_version,
+        plans=plans,
+        schedule_id=schedule_id,
+        schedule_version=schedule_version,
+        outerwear_policy=outerwear_policy,
     )
 
 
@@ -247,8 +289,45 @@ async def weather(request: Request, lat: float, lon: float):
 
 
 # ---- 2) 결과 -------------------------------------------------------------------
-@router.get("/recommend/result", response_class=HTMLResponse)
-async def recommend_result(
+@router.get("/recommend/result")
+async def legacy_recommend_result(request: Request):
+    # Old bookmarked links return to conditions; GET must never generate a recommendation.
+    return RedirectResponse("/recommend?" + request.url.query, status_code=303)
+
+
+@router.post("/recommend", response_class=HTMLResponse)
+async def submit_recommendation(request: Request):
+    if not request.cookies.get(TOKEN_COOKIE):
+        return go_login(request)
+    values = await request.form()
+    key = str(values.get("request_key", ""))
+    try:
+        key = str(UUID(key))
+    except ValueError:
+        return render(
+            request,
+            "recommend_status.html",
+            status=422,
+            message="추천 조건 화면을 다시 열어 요청해 주세요.",
+            waiting=False,
+        )
+    scalar_names = (
+        "band",
+        "temp",
+        "occasion",
+        "style_text",
+        "schedule_id",
+        "schedule_version",
+        "reference_id",
+        "reference_version",
+    )
+    fields = {name: str(values.get(name, "")) for name in scalar_names}
+    fields["outerwear_policy"] = str(values.get("outerwear_policy", "always_worn"))
+    fields.update({name: values.getlist(name) for name in ("styles", "exclude", "required")})
+    return await generate_recommendation(request, request_key=key, **fields)
+
+
+async def generate_recommendation(
     request: Request,
     band: str = "",
     temp: str = "",
@@ -256,6 +335,13 @@ async def recommend_result(
     styles: Annotated[list[str] | None, Query()] = None,
     style_text: str = "",
     exclude: Annotated[list[str] | None, Query()] = None,  # 화면에서는 없앰 (예전 주소용)
+    required: Annotated[list[str] | None, Query()] = None,
+    schedule_id: str = "",
+    schedule_version: str = "",
+    outerwear_policy: str = "always_worn",
+    reference_id: str = "",
+    reference_version: str = "",
+    request_key: str = "",
 ):
     token = request.cookies.get(TOKEN_COOKIE)
     if not token:
@@ -268,10 +354,35 @@ async def recommend_result(
         "styles": styles,
         "style_text": style_text.strip()[:MAX_STYLE_TEXT],
         "exclude": exclude,
+        "required": [gid for gid in (required or []) if gid],
     }
 
     # 입력 검사 (화면에서 고르는 값이라 보통은 통과)
     errors: dict[str, str] = {}
+    ref_version = None
+    if reference_id:
+        try:
+            from uuid import UUID
+
+            UUID(reference_id)
+            ref_version = int(reference_version)
+            if ref_version < 1:
+                raise ValueError
+        except ValueError:
+            errors["reference"] = "확인한 참고 사진을 다시 선택해 주세요"
+    version = None
+    if schedule_id:
+        try:
+            from uuid import UUID
+
+            UUID(schedule_id)
+            version = int(schedule_version)
+            if version < 1:
+                raise ValueError
+        except ValueError:
+            errors["schedule"] = "저장한 일정을 다시 선택해 주세요"
+    if outerwear_policy not in ("always_worn", "removable"):
+        errors["schedule"] = "아우터 착용 방식을 다시 선택해 주세요"
     temperature: float | None = None
     if form["temp"]:
         try:
@@ -292,8 +403,25 @@ async def recommend_result(
     all_styles = list(dict.fromkeys(styles + parse_style_text(form["style_text"])))
     form["all_styles"] = all_styles
 
+    usable, counts, plans, refs = [], {}, [], []
     try:
         garments, usable, counts = await wearable_garments(token)
+        plans = await list_plans(token)
+        refs = await list_references(token)
+        schedule_ui = dict(
+            refs=refs,
+            reference_id=reference_id,
+            reference_version=reference_version,
+            plans=plans,
+            schedule_id=schedule_id,
+            schedule_version=schedule_version,
+            outerwear_policy=outerwear_policy,
+        )
+        selection_error = required_selection_error(form["required"], usable)
+        if selection_error:
+            errors["required"] = selection_error
+        if set(form["required"]) & set(exclude):
+            errors["required"] = "필수 의류와 제외 의류에 같은 옷이 있어요. 조건을 다시 선택해 주세요."
         if errors:
             missing = [c for c in NEEDED if counts[c] == 0]
             return render(
@@ -306,6 +434,7 @@ async def recommend_result(
                 missing=missing,
                 form=form,
                 errors=errors,
+                **schedule_ui,
             )
         context = UserContext(
             user_id="me",  # TODO(C): 로그인(JWT) 후에는 백엔드가 토큰에서 사용자 확인
@@ -313,39 +442,130 @@ async def recommend_result(
             occasion=occasion or None,
             preferred_styles=all_styles,
             excluded_items=exclude,
+            required_garment_ids=form["required"],
+            reference_id=reference_id or None,
+            reference_version=ref_version,
+            schedule_id=schedule_id or None,
+            schedule_version=version,
+            outerwear_policy=outerwear_policy,
         )
-        result = await rec.recommend(token, context)
+        result = await rec.recommend(token, context, request_key=request_key)
     except ApiError as e:
         if e.status == 401:
             return logged_out()
+        if e.status == 0 or e.code == "RECOMMENDATION_IN_PROGRESS":
+            return RedirectResponse(f"/recommend/requests/{request_key}", status_code=303)
         return render(
             request,
-            "placeholder.html",
+            "recommend_form.html",
             status=http_status(e),
             active="recommend",
-            title="추천을 받지 못했어요",
-            message=e.message,
-            back="/recommend",
+            usable=usable,
+            counts=counts,
+            missing=[c for c in NEEDED if not counts.get(c)],
+            form=form,
+            server_error=e.message,
+            refs=refs,
+            reference_id=reference_id,
+            reference_version=reference_version,
+            plans=plans,
+            schedule_id=schedule_id,
+            schedule_version=schedule_version,
+            outerwear_policy=outerwear_policy,
         )
 
-    by_id = {g.garment_id: g for g in garments}
+    return RedirectResponse(f"/recommend/result/{result.recommendation_id}", status_code=303)
+
+
+@router.get("/recommend/requests/{request_key}", response_class=HTMLResponse)
+async def recommendation_progress(request: Request, request_key: UUID):
+    token = request.cookies.get(TOKEN_COOKIE)
+    if not token:
+        return go_login(request)
     try:
-        profile = await auth.get_profile(token)  # 착샷(전신 사진 유무)용 (없어도 됨)
+        state = await rec.get_request(token, str(request_key))
+    except ApiError as exc:
+        if exc.status == 401:
+            return logged_out()
+        return render(
+            request,
+            "recommend_status.html",
+            status=http_status(exc),
+            message=exc.message + " 요청을 자동으로 다시 보내지 않습니다.",
+            waiting=False,
+        )
+    if state["status"] == "completed":
+        return RedirectResponse(f"/recommend/result/{state['recommendation_id']}", status_code=303)
+    waiting = state["status"] == "pending"
+    message = (
+        "이미 접수한 추천을 만들고 있어요. 완료되면 결과를 보여드려요."
+        if waiting
+        else (
+            state.get("detail")
+            or "추천이 중단되었거나 결과가 삭제되었습니다. 조건 화면에서 새 추천을 시작해 주세요."
+        )
+    )
+    if state["status"] == "interrupted":
+        message = "처리 상태 확인이 지연되고 있어요. 잠시 후 이 화면을 새로고침해 결과를 확인해 주세요."
+    return render(request, "recommend_status.html", message=message, waiting=waiting, active="recommend")
+
+
+@router.get("/recommend/result/{recommendation_id}", response_class=HTMLResponse)
+async def saved_recommendation(request: Request, recommendation_id: UUID):
+    token = request.cookies.get(TOKEN_COOKIE)
+    if not token:
+        return go_login(request)
+    try:
+        result = await rec.get_result(token, str(recommendation_id))
+    except ApiError as exc:
+        if exc.status == 401:
+            return logged_out()
+        return render(
+            request, "recommend_status.html", status=http_status(exc), message=exc.message, waiting=False
+        )
+    context = result.context
+    form = {
+        "temp": context.temperature_c,
+        "occasion": context.occasion or "",
+        "styles": [s for s in context.preferred_styles if s in QUICK_STYLES],
+        "style_text": ", ".join(s for s in context.preferred_styles if s not in QUICK_STYLES),
+        "all_styles": context.preferred_styles,
+        "exclude": context.excluded_items,
+        "required": context.required_garment_ids,
+    }
+    edit = {k: v for k, v in form.items() if k != "all_styles"}
+    edit.update(
+        schedule_id=context.schedule_id or "",
+        schedule_version=context.schedule_version or "",
+        reference_id=context.reference_id or "",
+        reference_version=context.reference_version or "",
+        outerwear_policy=context.outerwear_policy,
+    )
+    try:
+        profile = await auth.get_profile(token)
     except ApiError:
         profile = None
-    missing = [
-        c for c in NEEDED if sum(1 for g in usable if g.category == c and g.garment_id not in exclude) == 0
-    ]
     return render(
         request,
         "recommend_result.html",
         active="recommend",
         result=result,
-        by_id=by_id,
-        temperature=temperature,
+        by_id=result.garments,
+        temperature=context.temperature_c,
         form=form,
-        missing=missing,
+        missing=[] if result.outfits else NEEDED,
         profile=profile,
+        edit_url="/recommend?" + urlencode(edit, doseq=True),
+        reference_id=context.reference_id,
+        schedule_id=context.schedule_id,
+        purposes=PURPOSE_LABELS,
+        environments=ENVIRONMENT_LABELS,
+        outer_actions={
+            "wear": "아우터 입기",
+            "carry": "아우터 벗고 소지",
+            "none": "아우터 없음",
+            "adjust": "구간에 따라 아우터 조절",
+        },
     )
 
 
@@ -407,10 +627,14 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
   .style-text { margin-top: 10px; }
   .warn { padding: 16px; border-radius: var(--radius); background: #f5f5f5; font-size: .9375rem; }
   .warn p { margin: 0 0 12px; }
+  .required-slots { display: grid; gap: 12px; }
+  .required-slot select { width: 100%; min-width: 0; min-height: 44px; padding: 10px;
+    border: 1px solid var(--line); border-radius: 10px; background: #fff; font: inherit; }
+  .required-slot label { display: block; margin-bottom: 6px; }
 </style>
 {% endblock %}
 {% block content %}
-{% from "macros.html" import garment_art %}
+{% from "macros.html" import garment_art, term_guide, term_chip %}
 <div class="rec">
   <h1>코디 추천</h1>
 
@@ -423,7 +647,45 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
   </div>
   {% endif %}
 
-  <form class="stack" method="get" action="/recommend/result" novalidate data-loading="코디 고르는 중…">
+<form class="stack" method="post" action="/recommend" novalidate data-loading="코디 고르는 중…">
+  <input type="hidden" name="request_key" value="{{ new_recommendation_key() }}">
+    <fieldset class="field required-slot"><legend><label for="reference-id">저장한 스타일 재현 (선택)</label></legend>
+      <select id="reference-id" name="reference_id"><option value="">참고 사진 없이 추천</option>{% for r in refs if r.status=='ready' %}<option value="{{r.id}}" data-version="{{r.version}}" {% if reference_id==r.id %}selected{% endif %}>참고 스타일 {{loop.index}} · {{r.features|length}}개 의류 특징</option>{% endfor %}</select>
+      <input type="hidden" id="reference-version" name="reference_version" value="{{reference_version or ''}}">
+      <p class="hint">확인한 사진 특징을 내 옷과 비교해요. 필수 의류·하루 일정 조건은 그대로 유지돼요.</p>
+      <a id="reference-manage" href="/style-references?back={{('/recommend?' ~ request.url.query)|urlencode}}">사진 올리고 특징 확인하기</a>
+      {% if errors.reference %}<p class="field-error" role="alert">{{errors.reference}}</p>{% endif %}
+    </fieldset>
+    <fieldset class="field required-slot">
+      <legend><label for="schedule-id">하루 일정 (선택)</label></legend>
+      <select id="schedule-id" name="schedule_id"><option value="">일정 없이 추천</option>{% for p in plans %}<option value="{{p.id}}" data-version="{{p.version}}" {% if schedule_id==p.id %}selected{% endif %}>{{p.date}} · 일정 {{p.events|length}}개</option>{% endfor %}</select>
+      <input id="schedule-version" type="hidden" name="schedule_version" value="{{schedule_version or ''}}">
+      <p class="hint">저장한 일정의 시간·실내외·목적을 함께 고려해요. 구간 기온을 입력하지 않으면 보온 적합성은 판단하지 않아요.</p>
+      <a id="schedule-manage" href="/day-plans?back={{('/recommend?' ~ request.url.query)|urlencode}}">하루 일정 입력·관리</a>
+      <label for="outerwear-policy" style="margin-top:12px">아우터 착용 방식</label>
+      <select id="outerwear-policy" name="outerwear_policy"><option value="always_worn">계속 입기</option><option value="removable" {% if outerwear_policy=='removable' %}selected{% endif %}>구간별로 벗고 소지 가능</option></select>
+      <p class="hint">벗는 구간에도 필수 선택 아우터는 코디와 소지 의류에 유지돼요.</p>
+      {% if errors.schedule %}<p class="field-error" role="alert">{{errors.schedule}}</p>{% endif %}
+    </fieldset>
+    <fieldset class="field">
+      <legend>꼭 입고 싶은 옷</legend>
+      <p class="hint">선택한 옷은 모든 추천에 포함돼요. 상의·하의·아우터에서 각각 한 벌까지 고를 수 있어요.</p>
+      <div class="required-slots">
+        {% for category in ["top", "bottom", "outerwear"] %}
+        <div class="required-slot">
+          <label for="required-{{ category }}">필수 {{ category | ko("category") }}</label>
+          <select id="required-{{ category }}" name="required" {% if errors.required %}aria-describedby="required-error"{% endif %}>
+            <option value="">선택하지 않음</option>
+            {% for g in usable if g.category == category %}
+            <option value="{{ g.garment_id }}" {% if g.garment_id in (form.required or []) %}selected{% endif %}>{{ garment_name(g) }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        {% endfor %}
+      </div>
+      {% if errors.required %}<p class="field-error" id="required-error" role="alert">{{ errors.required }}</p>{% endif %}
+      {% for gid in form.exclude or [] %}<input type="hidden" name="exclude" value="{{ gid }}">{% endfor %}
+    </fieldset>
     <fieldset class="field">
       <legend><label for="temp">오늘 기온</label></legend>
       <div class="temp-row">
@@ -456,13 +718,14 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
       <legend>원하는 스타일</legend>
       <div class="chips" id="pref-styles">
         {% for s in QUICK_STYLES %}
-        <label class="chip"><input type="checkbox" name="styles" value="{{ s }}" {% if s in form.styles %}checked{% endif %}><span>{{ s | ko("style") }}</span></label>
+        {{ term_chip("style", s, "styles", s in form.styles) }}
         {% endfor %}
       </div>
       <div class="input-box style-text">
         <input name="style_text" maxlength="{{ MAX_STYLE_TEXT }}" value="{{ form.style_text or '' }}" autocomplete="off"
                placeholder="직접 입력 (예: 빈티지, 꾸안꾸)" aria-label="원하는 스타일 직접 입력">
       </div>
+      {{ term_guide("style") }}
       {% if errors.styles %}<p class="field-error">{{ errors.styles }}</p>{% endif %}
     </fieldset>
 
@@ -471,8 +734,20 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
 </div>
 {% endblock %}
 {% block script %}
-<script>
+<script nonce="{{ request.state.csp_nonce | default('') }}">
   // 기온 1도씩 올리기·내리기
+  const scheduleSelect=document.getElementById('schedule-id');
+  const referenceSelect=document.getElementById('reference-id');
+  referenceSelect.addEventListener('change',()=>{document.getElementById('reference-version').value=referenceSelect.selectedOptions[0].dataset.version||'';});
+  for(const [id,path] of [['reference-manage','/style-references'],['schedule-manage','/day-plans']]){
+    const link=document.getElementById(id);
+    const remember=()=>{const back='/recommend?'+new URLSearchParams(new FormData(scheduleSelect.form));link.href=path+'?'+new URLSearchParams({back});};
+    link.addEventListener('click',remember);
+    link.addEventListener('contextmenu',remember);
+    scheduleSelect.form.addEventListener('input',remember);
+    scheduleSelect.form.addEventListener('change',remember);
+  }
+  scheduleSelect.addEventListener('change',()=>{document.getElementById('schedule-version').value=scheduleSelect.selectedOptions[0].dataset.version||'';});
   const temp = document.getElementById("temp");
   document.querySelectorAll(".step-btn").forEach((b) => b.addEventListener("click", () => {
     const now = parseFloat(temp.value);
@@ -545,8 +820,8 @@ OUTFIT_CARD_HTML = """{# 코디 카드 가운데: 옷 목록(아우터·상의·
 </style>
 {% endmacro %}
 
-{% macro outfit_fit(items, by_id) %}
-{% from "macros.html" import garment_art %}
+{% macro outfit_fit(items, by_id, required=[]) %}
+{% from "macros.html" import garment_art, term_guide %}
       <div class="fit">
         <div class="mq" hidden></div>
         <div class="plist">
@@ -554,8 +829,8 @@ OUTFIT_CARD_HTML = """{# 코디 카드 가운데: 옷 목록(아우터·상의·
           {% set gid = items[slot] %}
           {% if gid and by_id.get(gid) %}{% set g = by_id[gid] %}
           <a class="prow" href="/garments/{{ gid }}">
-            <span class="pthumb">{{ garment_art(g) }}</span>
-            <span><small>{{ slot_name }}</small><b>{{ garment_name(g) }}</b></span>
+            <span class="pthumb">{{ garment_art(g, thumbnail=true) }}</span>
+            <span><small>{{ slot_name }}{% if gid in required %} · 필수 포함{% endif %}</small><b>{{ garment_name(g) }}</b></span>
           </a>
           {% elif gid %}
           <div class="prow none">
@@ -603,20 +878,26 @@ RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
 </style>
 {% endblock %}
 {% block content %}
-{% from "macros.html" import garment_art %}
+{% from "macros.html" import garment_art, term_guide %}
 {% from "tryon.html" import tryon_button, tryon_dialog with context %}
 <div class="res">
   <div class="head">
     <div>
       <h1>추천 코디</h1>
+      <p class="hint">저장된 추천이에요. 새로고침해도 같은 코디를 보여드려요. 새 추천은 ‘조건 바꾸기’에서 요청해 주세요.</p>
+      {% if result.is_fallback %}<p class="hint" role="status">자동 판단을 사용할 수 없어 기본 추천 규칙으로 골랐어요. 필수 의류·일정·참고 스타일 조건은 유지했어요.</p>
+      {% elif result.provider == 'openai' %}<p class="hint" role="status">AI가 검증된 코디 후보의 순서와 이유를 정했어요. 필수 의류·일정·참고 스타일 조건은 유지했어요.</p>{% endif %}
       <div class="conds" aria-label="고른 조건">
         <span>{{ "%g" | format(temperature) }}°C</span>
         {% if form.occasion %}<span>{{ form.occasion | ko("occasion") }}</span>{% endif %}
-        {% for s in form.all_styles %}<span>{{ s | ko("style") }}</span>{% endfor %}
+        {% for s in form.all_styles %}<span title="{{ s | term_description("style") }}">{{ s | ko("style") }}</span>{% endfor %}
         {% if form.exclude %}<span>{{ form.exclude | length }}벌 뺌</span>{% endif %}
+        {% if form.required %}<span>선택한 옷 {{ form.required | length }}벌 필수 포함</span>{% endif %}
+        {% if schedule_id %}<span>하루 일정 반영</span>{% endif %}
+        {% if reference_id %}<span>참고 스타일 재현</span>{% endif %}
       </div>
     </div>
-    <a class="btn btn-secondary again" href="/recommend">조건 바꾸기</a>
+    <a class="btn btn-secondary again" href="{{ edit_url }}">조건 바꾸기</a>
   </div>
 
   {% if result.outfits %}
@@ -624,10 +905,15 @@ RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
     {% for o in result.outfits %}
     <article class="outfit" aria-labelledby="o{{ loop.index }}">
       <h2 id="o{{ loop.index }}">코디 {{ loop.index }}</h2>
-      {% if o.style_tags %}<div class="tags">{% for s in o.style_tags %}<span>{{ s | ko("style") }}</span>{% endfor %}</div>{% endif %}
-      {{ outfit_fit(o["items"], by_id) }}
+      {% if o.style_tags %}<div class="tags">{% for s in o.style_tags %}<span title="{{ s | term_description("style") }}">{{ s | ko("style") }}</span>{% endfor %}</div>{% endif %}
+      {{ outfit_fit(o["items"], by_id, form.required or []) }}
       {{ tryon_button(o["items"], loop.index, profile) }}
       {% if o.reason %}<p class="reason">{{ o.reason }}</p>{% endif %}
+      {% if o.reference_matches %}<section class="reference-matches"><h3 style="font-size:1rem">참고 사진과 비교</h3>{% for m in o.reference_matches %}<div style="padding:10px 0;border-top:1px solid var(--line)"><strong>{{m.category|ko('category')}}{% if m.fixed %} · 필수 선택 유지{% endif %}</strong>{% for text in m.matched %}<p class="hint">닮은 점: {{text}}</p>{% endfor %}{% for text in m.different %}<p class="hint">다른 점: {{text}}</p>{% endfor %}</div>{% endfor %}</section>{% endif %}
+      {% if o.limitations and not o.wearing_plan %}<details><summary>재현의 한계 확인</summary>{% for limitation in o.limitations %}<p class="hint">{{limitation}}</p>{% endfor %}</details>{% endif %}
+      {% if o.wearing_plan %}<section class="wearing-plan"><h3 style="font-size:1rem">하루 착용 안내</h3><p class="hint">상의·하의는 하루 동안 그대로 유지해요. 착샷은 위 전체 코디를 미리 보여줘요.</p>
+      {% for step in o.wearing_plan %}<div style="padding:10px 0;border-top:1px solid var(--line)"><strong>{{step.start_at.strftime('%H:%M')}}–{{step.end_at.strftime('%H:%M')}} · {{purposes[step.purpose]}}</strong><br><span>{{environments[step.environment]}} · {{outer_actions[step.outerwear_action]}}</span><p class="hint">{{step.note}}</p></div>{% endfor %}
+      <details><summary>추천의 한계 확인</summary>{% for limitation in o.limitations %}<p class="hint">{{limitation}}</p>{% endfor %}</details></section>{% endif %}
       <form class="fb" method="post" action="/recommend/feedback" data-fb>
         <input type="hidden" name="recommendation_id" value="{{ result.recommendation_id }}">
         <input type="hidden" name="outfit_id" value="{{ o.outfit_id }}">
@@ -657,7 +943,7 @@ RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
 {{ tryon_dialog() }}
 {% endblock %}
 {% block script %}
-<script>
+<script nonce="{{ request.state.csp_nonce | default('') }}">
   // 피드백은 페이지 이동 없이 보내기 (JS가 꺼져 있으면 일반 제출 후 돌아옴)
   document.querySelectorAll("form[data-fb]").forEach((form) => {
     const msg = form.nextElementSibling;
@@ -727,8 +1013,8 @@ HOME_HTML = """{% extends "app_base.html" %}
 
   <section class="sec" aria-labelledby="today-title">
     <div class="sec-head">
-      <h2 id="today-title">오늘의 코디</h2>
-      {% if weather %}<a href="/recommend/result?temp={{ '%g' | format(weather.temperature_c) }}">다른 코디</a>{% endif %}
+      <h2 id="today-title">최근 추천 코디</h2>
+      {% if weather %}<a href="/recommend?temp={{ '%g' | format(weather.temperature_c) }}">다른 코디</a>{% endif %}
     </div>
     {% if outfit %}
     <article class="outfit">
@@ -742,7 +1028,7 @@ HOME_HTML = """{% extends "app_base.html" %}
     </div>
     {% else %}
     <div class="empty">
-      <p>{{ outfit_error or "오늘의 코디를 불러오지 못했어요." }}</p>
+      <p>{{ outfit_error or "저장된 코디가 없어요. 조건을 골라 첫 추천을 받아 보세요." }}</p>
       <a class="btn btn-secondary" href="/recommend">조건 골라서 추천받기</a>
     </div>
     {% endif %}
@@ -765,7 +1051,7 @@ HOME_HTML = """{% extends "app_base.html" %}
 {{ tryon_dialog() }}
 {% endblock %}
 {% block script %}
-<script>
+<script nonce="{{ request.state.csp_nonce | default('') }}">
   // 내 위치 → 쿠키(소수 둘째 자리) → 새로고침하면 서버가 그 위치 기온으로 다시 그림. 거부하면 서울 기준
   (() => {
     const save = (v) => { document.cookie = `{{ LOC_COOKIE }}=${v}; path=/; max-age=${60 * 60 * 24 * 7}; samesite=lax`; };
@@ -784,14 +1070,23 @@ HOME_HTML = """{% extends "app_base.html" %}
 {% endblock %}
 """
 
+RECOMMEND_STATUS_HTML = """{% extends "app_base.html" %}
+{% block title %}추천 요청 확인{% endblock %}
+{% block content %}<h1>추천 요청 확인</h1><p role="status">{{ message }}</p>
+{% if waiting %}<p class="muted">같은 요청을 다시 생성하지 않고 진행 상태만 확인합니다.</p>
+<script nonce="{{ request.state.csp_nonce | default('') }}">setTimeout(() => window.location.reload(), 2000);</script>{% endif %}
+<a class="btn" href="/recommend">추천 조건으로</a>{% endblock %}"""
+
 register_templates(
     {
         "recommend_form.html": RECOMMEND_FORM_HTML,
+        "recommend_status.html": RECOMMEND_STATUS_HTML,
         "recommend_result.html": RECOMMEND_RESULT_HTML,
         "outfit_card.html": OUTFIT_CARD_HTML,
         "home.html": HOME_HTML,
     },
     TEMP_BANDS=TEMP_BANDS,
+    new_recommendation_key=lambda: str(uuid4()),
     MAX_PREF_STYLES=MAX_PREF_STYLES,
     QUICK_STYLES=QUICK_STYLES,
     MAX_STYLE_TEXT=MAX_STYLE_TEXT,

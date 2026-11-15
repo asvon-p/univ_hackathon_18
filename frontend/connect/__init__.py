@@ -104,7 +104,7 @@ async def request_bytes(method: str, path: str, *, token: str | None = None, **k
 
 
 async def _send(method: str, path: str, *, token: str | None, **kwargs) -> httpx.Response:
-    headers = {"Accept": "application/json"}
+    headers = {"Accept": "application/json", **kwargs.pop("headers", {})}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:

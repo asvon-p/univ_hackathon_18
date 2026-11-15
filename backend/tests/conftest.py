@@ -8,18 +8,20 @@ from uuid import UUID, uuid4
 os.environ.update(
     {
         "APP_ENV": "test",
+        # Most legacy fixtures explicitly construct their own wardrobe. Starter tests enable this.
+        "STARTER_WARDROBE_ENABLED": "false",
         "FITJANG_SKIP_DOTENV": "1",
         "WEATHER_PROVIDER": "manual",
         "VISION_PROVIDER": "mock",
         "VISION_CLASSIFIER": "demo",
         "VISION_SEGMENTATION": "flat",
         "RECOMMENDER_PROVIDER": "mock",
+        "API_USAGE_ENABLED": "false",
         "OPENAI_API_KEY": "",
         "LLM_API_KEY": "",
         "VISION_TIMEOUT_SEC": "2",
         "RECOMMEND_TIMEOUT_SEC": "2",
         "JWT_SECRET": "tests-only-secret-do-not-use-in-production-12345678",
-        "SIGNUP_INVITE_CODE": "",
         "STORAGE_DELETE_RETRY_SECONDS": "0",
     }
 )
@@ -36,13 +38,14 @@ sys.addaudithook(_deny_dotenv_access)
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import create_engine, event, text  # noqa: E402
+from sqlalchemy import event, text  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from backend.app.adapters import registry  # noqa: E402
 from backend.app.core.config import get_settings  # noqa: E402
 from backend.app.db.base import Base  # noqa: E402
+from backend.app.db.engine import create_database_engine as create_engine  # noqa: E402
 from backend.app.deps import get_db, get_storage  # noqa: E402
 from backend.app.storage.local import LocalStorage  # noqa: E402
 

@@ -6,10 +6,15 @@
 
 from __future__ import annotations
 
+from urllib.parse import unquote
+
 from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from jinja2 import DictLoader, Environment, select_autoescape
+
+from shared.garment_terms import LABELS
+from shared.tryon_maintenance import read_state as tryon_service_state
 
 from .connect import BODY_PHOTO_ENABLED, USE_MOCK, ApiError
 from .connect import auth_profile as auth
@@ -19,107 +24,36 @@ TOKEN_COOKIE = "fitjang_token"
 EMAIL_COOKIE = "fitjang_email"
 
 # 공통 단어(shared/contracts.py, DECISIONS §3) → 화면 한글 표시. 목록에 없는 값은 그대로 보여줌
-LABELS: dict[str, dict] = {
-    "category": {
-        "top": "상의",
-        "bottom": "하의",
-        "outerwear": "아우터",
-        "shoes": "신발",
-    },
-    "color": {
-        "black": "블랙",
-        "white": "화이트",
-        "gray": "그레이",
-        "ivory": "아이보리",
-        "beige": "베이지",
-        "brown": "브라운",
-        "camel": "카멜",
-        "khaki": "카키",
-        "navy": "네이비",
-        "blue": "블루",
-        "sky_blue": "스카이블루",
-        "denim": "데님",
-        "green": "그린",
-        "olive": "올리브",
-        "red": "레드",
-        "burgundy": "버건디",
-        "pink": "핑크",
-        "purple": "퍼플",
-        "yellow": "옐로",
-        "orange": "오렌지",
-        "multi": "멀티",
-        "unknown": "색상 미정",
-    },
+
+TERM_DESCRIPTIONS = {
     "pattern": {
-        "solid": "무지",
-        "stripe": "스트라이프",
-        "check": "체크",
-        "dot": "도트",
-        "floral": "플라워",
-        "graphic": "그래픽",
-        "other": "기타 패턴",
-        "unknown": "패턴 미정",
+        "solid": "줄이나 그림 같은 무늬가 없는 옷이에요.",
+        "stripe": "가로·세로·사선으로 줄이 이어지는 무늬예요.",
+        "check": "바둑판처럼 가로선과 세로선이 겹치는 무늬예요.",
+        "dot": "동그란 점이 반복되는 무늬예요.",
+        "floral": "꽃이나 잎 모양이 들어간 무늬예요.",
+        "graphic": "그림·글자·로고가 들어간 옷이에요.",
+        "other": "호피나 얼룩무늬처럼 다른 항목에 없는 무늬예요.",
+        "unknown": "무늬를 구분하기 어렵거나 아직 고르지 않은 상태예요.",
     },
     "style": {
-        "casual": "캐주얼",
-        "minimal": "미니멀",
-        "street": "스트릿",
-        "formal": "포멀",
-        "dandy": "댄디",
-        "sporty": "스포티",
-        "vintage": "빈티지",
-        "feminine": "페미닌",
-        "amekaji": "아메카지",
-    },
-    "occasion": {
-        "daily": "일상",
-        "work": "출근",
-        "date": "데이트",
-        "interview": "면접",
-        "exercise": "운동",
-        "travel": "여행",
-    },
-    "status": {
-        "available": "입을 수 있음",
-        "laundry": "세탁 중",
-        "inactive": "추천 제외",  # inactive의 뜻은 문서에 없음 — 실제 동작(추천에서 빠짐)대로 표시
-    },
-    "thermal_level": {
-        1: "매우 얇음",
-        2: "얇음",
-        3: "보통",
-        4: "두꺼움",
-        5: "매우 두꺼움",
-    },
-    "subcategory": {
-        "t_shirt": "티셔츠",
-        "shirt": "셔츠",
-        "blouse": "블라우스",
-        "sweater": "니트",
-        "knit": "니트",
-        "sweatshirt": "맨투맨",
-        "hoodie": "후드티",
-        "cardigan": "가디건",
-        "vest": "조끼",
-        "jeans": "청바지",
-        "slacks": "슬랙스",
-        "pants": "바지",
-        "shorts": "반바지",
-        "skirt": "치마",
-        "jogger": "조거 팬츠",
-        "coat": "코트",
-        "jacket": "재킷",
-        "padding": "패딩",
-        "jumper": "점퍼",
-        "blazer": "블레이저",
-        "sneakers": "스니커즈",
-        "loafers": "로퍼",
-        "boots": "부츠",
-        "sandals": "샌들",
-        "heels": "힐",
-        "dress_shoes": "구두",
+        "casual": "티셔츠·청바지처럼 편하게 입는 일상적인 느낌이에요.",
+        "minimal": "장식이 적고 색 조합이 단순해 깔끔한 느낌이에요.",
+        "street": "넉넉한 옷과 눈에 띄는 그림으로 자유롭고 개성 있는 느낌이에요.",
+        "formal": "정장처럼 면접이나 중요한 자리에 맞춰 차려입은 느낌이에요.",
+        "dandy": "셔츠·니트 등을 단정하게 맞춰 입은 반듯한 느낌이에요.",
+        "sporty": "운동복처럼 가볍고 활동적인 느낌이에요.",
+        "vintage": "바랜 색이나 옛날 디자인에서 멋이 느껴지는 옷차림이에요.",
+        "feminine": "레이스·리본·곡선으로 부드럽고 우아한 느낌을 살린 옷차림이에요.",
+        "amekaji": "청바지·면바지·셔츠를 편하게 겹쳐 입는 소박하고 튼튼한 느낌이에요.",
     },
 }
+
+
+def term_description(value, kind):
+    return TERM_DESCRIPTIONS.get(kind, {}).get(value, "")
+
+
 COLOR_HEX = {
     "black": "#1f1f1f",
     "white": "#fafafa",
@@ -178,7 +112,13 @@ def current_user(request: Request) -> str | None:
 
 def safe_next(next_url: str | None) -> str:
     """로그인 후 돌아갈 주소. 다른 사이트로 튕기지 않게 내부 경로만 허용."""
-    if next_url and next_url.startswith("/") and not next_url.startswith("//"):
+    decoded = unquote(next_url or "")
+    if (
+        decoded.startswith("/")
+        and not decoded.startswith("//")
+        and "\\" not in decoded
+        and not any(ord(char) < 32 for char in decoded)
+    ):
         return next_url
     return "/"
 
@@ -269,13 +209,37 @@ BASE_HTML = """<!doctype html>
 
     /* 선택 버튼 (성별 등) */
     fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
-    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; position: relative; }
+    .chip[data-tooltip]:is(:hover, :focus-within)::after { content: attr(data-tooltip); position: absolute;
+      left: 0; top: calc(100% + 4px); z-index: 20; width: max-content; max-width: 100%; box-sizing: border-box;
+      background: #242424; color: white; border-radius: 6px; padding: 8px 12px; font-size: 13px;
+      line-height: 1.5; pointer-events: none; font-weight: normal; }
+    .term-help-open .chip[data-tooltip]::after { content: none; }
+    .term-guide { margin-top: 12px; font-size: 13px; color: var(--ink-soft); }
+    .term-hint { margin: 10px 0 0; font-size: 12px; color: var(--ink-soft); line-height: 1.5; }
+    .term-guide summary { cursor: pointer; }
+    .term-guide dl { margin: 10px 0; }
+    .term-guide dt { font-weight: 600; margin-top: 8px; }
+    .term-guide dd { margin: 2px 0 0; }
     .chip input { position: absolute; opacity: 0; pointer-events: none; }
     .chip span { display: inline-flex; align-items: center; height: 40px; padding: 0 16px; border: 1px solid var(--line);
                  border-radius: 6px; background: #fff; font-size: .9375rem; cursor: pointer; transition: all .15s; }
     .chip span:hover { border-color: var(--ink-soft); }
     .chip input:checked + span { background: var(--ink); border-color: var(--ink); color: #fff; }
     .chip input:focus-visible + span { outline: 2px solid var(--ink); outline-offset: 2px; }
+    .term-choice { display: inline-flex; align-items: center; }
+    .term-choice .chip span { height: 44px; border-radius: 6px 0 0 6px; border-right: 0; }
+    .term-help { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+      width: 44px; height: 44px; padding: 0; border: 1px solid var(--line); border-radius: 0 6px 6px 0;
+      color: var(--ink-soft); background: #fff; cursor: pointer; touch-action: manipulation; }
+    .term-help svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+    .term-help:hover, .term-help[aria-expanded=true] { background: #f0f0f0; color: var(--ink); }
+    .term-help:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+    .term-popover { position: absolute; left: 0; top: calc(100% + 4px); z-index: 21;
+      width: max-content; max-width: 100%; box-sizing: border-box; padding: 10px 12px;
+      background: #242424; color: #fff; border-radius: 6px; font-size: 13px; line-height: 1.5;
+      overflow-wrap: anywhere; box-shadow: 0 3px 12px #0002;
+      scroll-margin-top: 80px; scroll-margin-bottom: calc(88px + env(safe-area-inset-bottom)); }
 
     /* 버튼 */
     .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 48px;
@@ -314,7 +278,7 @@ BASE_HTML = """<!doctype html>
 </head>
 <body>
 {% block body %}{% endblock %}
-<script>
+<script nonce="{{ request.state.csp_nonce | default('') }}">
   // 비밀번호 보기/숨기기 (data-target = 입력칸 id)
   document.querySelectorAll(".toggle[data-target]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -331,8 +295,51 @@ BASE_HTML = """<!doctype html>
       const btn = form.querySelector("button[type=submit]");
       btn.disabled = true;
       btn.setAttribute("aria-busy", "true");
-      btn.innerHTML = '<span class="spinner" aria-hidden="true"></span>' + form.dataset.loading;
+      const spinner = document.createElement('span');
+      spinner.className = 'spinner'; spinner.setAttribute('aria-hidden', 'true');
+      btn.replaceChildren(spinner, document.createTextNode(form.dataset.loading));
     });
+  });
+  document.querySelectorAll('[data-confirm-details]').forEach(details => {
+    details.addEventListener('toggle', () => {
+      if (details.open) details.querySelector('.confirm-box').scrollIntoView({block:'nearest', behavior:'smooth'});
+    });
+  });
+  document.querySelectorAll('[data-close-details]').forEach(button => {
+    button.addEventListener('click', () => { button.closest('details').open = false; });
+  });
+  // Help buttons are siblings of the choice labels: opening help never toggles a choice.
+  function closeTermHelp() {
+    document.documentElement.classList.remove('term-help-open');
+    document.querySelectorAll('[data-term-help][aria-expanded="true"]').forEach(button => {
+      button.setAttribute('aria-expanded', 'false');
+      document.getElementById(button.getAttribute('aria-controls')).hidden = true;
+    });
+  }
+  document.querySelectorAll('[data-term-help]').forEach(button => {
+    button.addEventListener('click', () => {
+      const open = button.getAttribute('aria-expanded') !== 'true';
+      closeTermHelp();
+      button.setAttribute('aria-expanded', String(open));
+      const panel = document.getElementById(button.getAttribute('aria-controls'));
+      panel.hidden = !open;
+      document.documentElement.classList.toggle('term-help-open', open);
+      if (open) {
+        const box = panel.getBoundingClientRect();
+        if (box.bottom > window.innerHeight - 88 || box.top < 72) panel.scrollIntoView({block:'nearest'});
+      }
+    });
+  });
+  document.addEventListener('click', event => {
+    if (!event.target.closest('[data-term-help], .term-popover')) closeTermHelp();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    const button = document.querySelector('[data-term-help][aria-expanded="true"]');
+    if (button) {
+      closeTermHelp();
+      button.focus();
+    }
   });
 </script>
 {% block script %}{% endblock %}
@@ -376,10 +383,28 @@ MACROS_HTML = """{% macro brand(inverted=False) -%}
 {%- endmacro %}
 
 {# 옷 사진: 있으면 사진, 없으면 옷 색 동그라미만 (2026-11-08: 그림 옷 아이콘은 AI 티가 나서 없앰) #}
-{% macro garment_art(g) -%}
-{% set url = image_url(g) %}
-{% if url %}<img src="{{ url }}" alt="" loading="lazy">{% else %}
+{% macro garment_art(g, thumbnail=false) -%}
+{% set url = image_url(g, thumbnail=thumbnail) %}
+{% if url %}<img src="{{ url }}" alt="" loading="lazy" decoding="async">{% else %}
 <span class="noimg" aria-hidden="true"><i style="background:{{ 'conic-gradient(#c0392b, #f2c94c, #2f5fb3, #c0392b)' if g.color == 'multi' else color_hex(g.color) }}"></i><span class="cap">사진 없음</span></span>{% endif %}
+{%- endmacro %}
+{% macro term_chip(kind, value, name, checked=False, label=None) -%}
+{% set description = value | term_description(kind) %}
+{% set caption = label or (value | ko(kind)) %}
+{% set help_id = 'term-help-' ~ name ~ '-' ~ value %}
+<span class="term-choice">
+  <label class="chip" data-tooltip="{{ description }}"><input type="{{ 'radio' if kind == 'pattern' else 'checkbox' }}" name="{{ name }}" value="{{ value }}" aria-describedby="{{ help_id }}" {% if checked %}checked{% endif %}><span>{{ caption }}</span></label>
+  <button type="button" class="term-help" data-term-help aria-label="{{ caption }} 설명" aria-controls="{{ help_id }}" aria-describedby="{{ help_id }}" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button>
+  <span class="term-popover" id="{{ help_id }}" role="tooltip" hidden>{{ caption }}: {{ description }}</span>
+</span>
+{%- endmacro %}
+{% macro term_guide(kind) -%}
+<p class="term-hint">이름 옆 ⓘ를 누르면 뜻을 볼 수 있어요. 설명을 열어도 선택은 바뀌지 않아요.</p>
+<details class="term-guide"><summary>{{ '스타일' if kind == 'style' else '패턴' }} 설명 보기</summary>
+{% if kind == 'pattern' %}<p>패턴은 옷에 있는 무늬를 뜻해요.</p>{% endif %}
+{% if kind == 'style' %}<p>스타일은 서로 겹칠 수 있고, 성별과 관계없이 선택할 수 있어요.</p>{% endif %}
+<dl>{% for key, description in TERM_DESCRIPTIONS[kind].items() %}<dt>{{ key | ko(kind) }}</dt><dd>{{ description }}</dd>{% endfor %}</dl>
+</details>
 {%- endmacro %}"""
 
 APP_BASE_HTML = """{% extends "base.html" %}
@@ -434,9 +459,46 @@ APP_BASE_HTML = """{% extends "base.html" %}
 </header>
 {% endif %}
 <main class="content{% if bare %} bare{% endif %}">
+  {% if not bare %}<p><a href="/tryon/history">내 착샷</a> <a id="admin-link" href="/admin" hidden>관리자</a></p>
+  <script nonce="{{ request.state.csp_nonce }}">fetch('/admin/access').then(r=>r.json()).then(r=>{if(r.admin)document.getElementById('admin-link').hidden=false;}).catch(()=>{});</script>{% endif %}
+  {% set gpu_service = tryon_service_state() %}
+  <aside id="tryon-maintenance" role="status" aria-live="polite"
+         style="padding:12px 16px;margin-bottom:16px;border-radius:12px;background:#fff4dd;color:#614500"
+         {% if gpu_service.available %}hidden{% endif %}>{{ gpu_service.message }}</aside>
   {% if bare %}{{ brand() }}{% endif %}
   {% block content %}{% endblock %}
 </main>
+<script nonce="{{ request.state.csp_nonce | default('') }}">
+(() => {
+  let lastActivity = 0;
+  async function recordActivity() {
+    if (document.visibilityState !== 'visible' || Date.now() - lastActivity < 60000) return;
+    lastActivity = Date.now();
+    try {
+      const response = await fetch('/session/activity', {method:'POST', keepalive:true});
+      if (response.status === 401) window.location.href = '/login?expired=1';
+    } catch {}
+  }
+  {% if not bare %}
+  recordActivity();
+  ['pointerdown','keydown','touchstart','scroll'].forEach(name =>
+    window.addEventListener(name, recordActivity, {passive:true}));
+  {% endif %}
+  const banner = document.getElementById('tryon-maintenance');
+  async function refreshTryonService() {
+    try {
+      const response = await fetch('/tryon/service-status', {cache: 'no-store'});
+      if (!response.ok) return;
+      const service = await response.json();
+      banner.hidden = service.available;
+      banner.textContent = service.message;
+      window.dispatchEvent(new CustomEvent('tryon-service', {detail: service}));
+    } catch { /* Keep the last known state; the submit endpoint also enforces it. */ }
+  }
+  refreshTryonService();
+  setInterval(refreshTryonService, 5000);
+})();
+</script>
 {% if not bare %}
 <nav class="tabbar" aria-label="주 메뉴">
   {% for key, href, label in menu %}
@@ -483,13 +545,16 @@ env.globals.update(
     LOGO_PATH_SVG=LOGO_PATH_SVG,
     CATEGORY_ORDER=CATEGORY_ORDER,
     LABELS=LABELS,
+    TERM_DESCRIPTIONS=TERM_DESCRIPTIONS,
     color_hex=color_hex,
     garment_name=garment_name,
     image_url=closet.image_url,
     USE_MOCK=USE_MOCK,
     body_photo_enabled=BODY_PHOTO_ENABLED,
+    tryon_service_state=tryon_service_state,
 )
 env.filters["ko"] = ko
+env.filters["term_description"] = term_description
 templates = Jinja2Templates(env=env)
 
 
@@ -507,4 +572,9 @@ def render(request: Request, name: str, status: int = 200, **context) -> HTMLRes
     context.setdefault("server_error", None)
     context.setdefault("active", None)
     context.setdefault("bare", False)
-    return templates.TemplateResponse(request, name, context, status_code=status)
+    response = templates.TemplateResponse(request, name, context, status_code=status)
+    # Include form error responses that render the same photo picker again.
+    response.headers["Permissions-Policy"] = (
+        "camera=(self)" if name in ("garment_new.html", "body_photo.html") else "camera=()"
+    )
+    return response

@@ -1,5 +1,7 @@
 # 팀 브랜치 통합 분석 — 2026-11-08
 
+> 2026-11-11 변경: 초대 코드 기능은 화면·API·설정에서 제거했습니다. 아래 초대 코드 언급은 당시 점검 기록이며 현재 가입 조건이 아닙니다. 현재 계약은 [TEAM_API_CONTRACT.md](TEAM_API_CONTRACT.md)를 참고하세요.
+
 > **현재 통합 상태:** D `85ddedc`의 소스를 작업 트리에 반영하고 실제 화면·PostgreSQL 281개 테스트를 검증했습니다.
 > 아래는 병합 전 분석 기록이며 최신 결과는 [FRONTEND_INTEGRATION.md](FRONTEND_INTEGRATION.md)가 기준입니다.
 > Git merge 커밋·push는 수행하지 않았습니다.

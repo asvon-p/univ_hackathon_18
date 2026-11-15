@@ -1,31 +1,37 @@
+from typing import get_args
+
 from recommendation.rules import filter_outfits_by_weather, generate_outfits
-from shared.contracts import GarmentAttributes, UserContext
+from shared.contracts import GarmentAttributes, StyleTag, UserContext
+
+STYLE_TAGS = frozenset(get_args(StyleTag))
+# 기존 색상:상황 = 40:60 비율을 유지하며 전체의 30%를 사용자 선호에 배정합니다.
+PREFERENCE_WEIGHT = 0.30
+
+
+def supported_preferences(preferred_styles: list[str]) -> set[str]:
+    """태그로 비교할 수 있는 선호만 사용합니다. 자유 문장을 임의로 해석하지 않습니다."""
+    return {style.strip().lower() for style in preferred_styles} & STYLE_TAGS
 
 
 def calculate_style_score(
-    top_styles: list[str], bottom_styles: list[str], preferred_styles: list[str]
-) -> int:
+    top_styles: list[str],
+    bottom_styles: list[str],
+    preferred_styles: list[str],
+    outer_styles: list[str] | None = None,
+) -> float:
+    """입는 의류 중 선호 태그가 하나 이상 겹치는 비율 (60점 만점).
 
-    # 사용자가 선호 스타일을 선택하지 않은 경우
-    if not preferred_styles:
+    아우터 없음(None)은 분모에서 제외하고, 태그 없는 아우터([])는 미일치로 봅니다.
+    태그/선호 개수가 많다고 중복 가산하지 않습니다.
+    """
+    preferred = supported_preferences(preferred_styles)
+    if not preferred:
         return 30
-
-    # 상의와 하의가 각각 선호 스타일과 일치하는지 확인
-    top_match = any(style in preferred_styles for style in top_styles)
-
-    bottom_match = any(style in preferred_styles for style in bottom_styles)
-
-    # 상의와 하의 모두 일치
-    if top_match and bottom_match:
-        return 60
-
-    # 둘 중 하나만 일치
-    elif top_match or bottom_match:
-        return 30
-
-    # 둘 다 일치하지 않음
-    else:
-        return 0
+    slots = [top_styles, bottom_styles]
+    if outer_styles is not None:
+        slots.append(outer_styles)
+    matches = sum(bool(preferred.intersection(styles)) for styles in slots)
+    return 60 * matches / len(slots)
 
 
 def calculate_color_score(
@@ -149,7 +155,9 @@ def calculate_total_score(
     bottom_styles: list[str],
     occasion: str | None,
     outer_color: str | None = None,
-) -> int:
+    preferred_styles: list[str] | None = None,
+    outer_styles: list[str] | None = None,
+) -> float:
 
     # 색상 조화도 (40점 만점)
     color_score = calculate_color_score(top_color, bottom_color, outer_color)
@@ -157,8 +165,13 @@ def calculate_total_score(
     # 상황 적합도 (60점 만점)
     occasion_score = calculate_occasion_score(top_styles, bottom_styles, occasion)
 
-    # 최종 점수 (100점 만점)
-    return color_score + occasion_score
+    base_score = color_score + occasion_score
+    if not supported_preferences(preferred_styles or []):
+        # 미선택/지원하지 않는 자유 입력만 있으면 기존 점수와 순위를 그대로 보존합니다.
+        return base_score
+    style_score = calculate_style_score(top_styles, bottom_styles, preferred_styles, outer_styles)
+    # 색상 최대 28 + 상황 최대 42 + 선호 최대 30 = 100점.
+    return round(base_score * (1 - PREFERENCE_WEIGHT) + style_score / 60 * 100 * PREFERENCE_WEIGHT, 2)
 
 
 def rank_outfits(outfits: list[dict]) -> list[dict]:
@@ -174,7 +187,7 @@ def score_garment_pair(
     bottom: GarmentAttributes,
     context: UserContext,
     outer: GarmentAttributes | None = None,
-) -> int:
+) -> float:
 
     return calculate_total_score(
         top_color=top.color,
@@ -183,6 +196,8 @@ def score_garment_pair(
         bottom_styles=bottom.style_candidates,
         occasion=context.occasion,
         outer_color=outer.color if outer else None,
+        preferred_styles=context.preferred_styles,
+        outer_styles=outer.style_candidates if outer else None,
     )
 
 
@@ -212,7 +227,7 @@ def score_outfits(outfits: list[dict], garments: list[GarmentAttributes], contex
 def recommend_top3(garments: list[GarmentAttributes], context: UserContext) -> list[dict]:
 
     # 1. 가능한 코디 조합 생성
-    outfits = generate_outfits(garments)
+    outfits = generate_outfits(garments, context)
 
     # 2. 날씨에 맞지 않는 코디 제외
     filtered_outfits = filter_outfits_by_weather(outfits, context.temperature_c)

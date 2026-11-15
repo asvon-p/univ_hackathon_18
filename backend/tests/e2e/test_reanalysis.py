@@ -17,7 +17,7 @@ def register(client):
     credentials = {"email": f"retry-{uuid4().hex}@example.com", "password": "e2e-only-password-123"}
     signup = client.post(
         "/api/v1/auth/signup",
-        json={**credentials, "nickname": "retry", "invite_code": "e2e-invite-only"},
+        json={**credentials, "nickname": "retry"},
     )
     assert signup.status_code == 201
     login = client.post("/api/v1/auth/login", json=credentials)
@@ -59,7 +59,7 @@ def test_live_reanalysis_recovers_failed_record_and_preserves_manual_edits(live_
         body = retried.json()
         assert body["analysis_status"] == "done" and body["category"] == "top"
         assert body["model_version"] == (
-            "mock-1" if provider == "mock" else "vision-baseline-0.2/demo/flat/demo-manual-category"
+            "mock-1" if provider == "mock" else "vision-baseline-0.3/demo/flat/demo-manual-category"
         )
         edits = {"category": "bottom", "color": "navy", "style_candidates": [], "thermal_level": None}
         assert client.patch(path, headers=headers, json=edits).status_code == 200

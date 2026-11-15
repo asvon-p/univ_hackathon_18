@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy.orm import Session
 
 from backend.app.adapters.base import WeatherPort
@@ -10,6 +10,7 @@ from backend.app.schemas.feedback import FeedbackRequest, FeedbackResponse
 from backend.app.schemas.recommendation import RecommendationRequest, RecommendationResponse
 from backend.app.services.feedback import FeedbackService
 from backend.app.services.recommendation import RecommendationService
+from backend.app.services.recommendation_requests import RecommendationRequests
 
 router = APIRouter(prefix="/api/v1/recommendations", tags=["recommendations"])
 
@@ -49,8 +50,19 @@ def create_recommendation(
     service: RecommendationService = Depends(get_recommendation_service),
     recommender: SafeRecommender = Depends(get_recommender),
     weather: WeatherPort = Depends(get_weather),
+    idempotency_key: str | None = Header(
+        default=None, min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"
+    ),
 ):
-    return service.create(user_id, body, recommender, weather)
+    return service.create(user_id, body, recommender, weather, request_key=idempotency_key)
+
+
+@router.get("/requests/{request_key}")
+def request_status(
+    request_key: str, user_id: UUID = Depends(get_current_user_id), db: Session = Depends(get_db)
+):
+    requests = RecommendationRequests(db)
+    return requests.state(requests.get(user_id, request_key))
 
 
 @router.get("", response_model=list[RecommendationResponse])

@@ -22,7 +22,6 @@ def test_live_worker_cleans_durable_job_without_another_delete_request(live_api)
             "email": email,
             "password": password,
             "nickname": "cleanup",
-            "invite_code": "e2e-invite-only",
         },
     )
     assert signup.status_code == 201

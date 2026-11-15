@@ -28,6 +28,8 @@ class AccountService:
             # 피드백의 사용자/추천/코디 참조와 자유 입력 사유를 함께 익명화합니다.
             self.db.delete(user)
             self.db.commit()
+            from backend.app.services.media_session import discard_user
+            discard_user(user_id)
         except Exception:
             self.db.rollback()
             raise

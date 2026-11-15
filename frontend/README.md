@@ -1,5 +1,8 @@
 # Fitjang 프론트 — 팀원 D 코드 통합
 
+2026-11-12: 코디 추천의 **사진 올리고 특징 확인하기**에서 저장한 스타일을
+내 옷장으로 재현할 수 있습니다. [사용법·지원 범위](../docs/STYLE_REFERENCES.md).
+
 `origin/feat/frontend@85ddedc`의 FastAPI + Jinja2 화면 서버를 현재 작업 트리에 통합했습니다.
 프론트는 별도 Uvicorn 서버이며 `frontend/dist` 빌드는 필요하지 않습니다.
 기본은 실제 백엔드 연결입니다. 기존 백엔드 코드와 Git 스테이징 상태를 유지했습니다.
@@ -30,8 +33,9 @@ python -m scripts.mentor_demo --stop
 ```
 
 - 공개 주소는 상태 출력과 `.demo/mentor-demo/runtime.json`에서 확인합니다. 터널 재시작 시 바뀝니다.
-- 시연 로그인 정보와 임의 JWT 키·가입 초대 코드는 `.demo/mentor-demo/credentials.json`에 보관합니다.
-  멘토에게는 로그인 이메일·비밀번호만 전달하고 JWT 키와 초대 코드를 전달하지 않습니다.
+- 시연 로그인 정보와 임의 JWT 키는 `.demo/mentor-demo/credentials.json`에 보관합니다.
+  멘토에게는 로그인 이메일·비밀번호만 전달하고 JWT 키는 전달하지 않습니다.
+  초대 코드 기능은 제거했으며 기존 자격증명 파일의 과거 코드 값은 사용하지 않습니다.
 - `.env` 및 `.env.demo`는 읽거나 수정하지 않습니다. 기존 setup/seed 스크립트도 실행하지 않습니다.
 - 계정은 `mentor-demo@example.com`이며 샘플 옷은 실제 모델 품질 평가용 사진이 아닙니다.
 - 추천은 A의 local 엔진, 비전은 현재 local stub입니다. GPT와 GPU 착샷은 사용하지 않습니다.
@@ -94,7 +98,7 @@ python -m uvicorn frontend.app:app --host 127.0.0.1 --port 3000
 
 ## 통합하며 수정한 부분
 
-- 회원가입 초대 코드 입력과 가입 JWT 쿠키 연결.
+- 이메일·비밀번호 회원가입과 가입 JWT 쿠키 연결. 초대 코드 입력·검사 없음.
 - 최초 신체정보 저장에 명시적 동의 체크박스. 미동의 요청은 백엔드가 거부합니다.
 - 로컬 실행기에서는 전신 사진 화면과 가입 후 사진 단계를 활성화합니다. 업로드 동의는 별도 확인합니다.
 - 누끼가 없는 옷도 인증된 원본 이미지 경로로 표시.

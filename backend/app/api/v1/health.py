@@ -24,14 +24,16 @@ def _gpu_status() -> str | None:
 @router.get("/health", response_model=HealthResponse)
 def health():
     ok, err = check_db()
+    vision = get_vision()
     return HealthResponse(
-        status="ok" if ok else "degraded",
+        status="ok" if ok and not vision.warmup_error else "degraded",
         app_env=get_settings().APP_ENV,
         contract_version=CONTRACT_VERSION,
         db="ok" if ok else "down",
         db_error=err,
+        vision_error=vision.warmup_error,
         adapters={
-            "vision": get_vision().name,
+            "vision": vision.name,
             "recommender": get_recommender().name,
             "weather": get_weather().name,
         },

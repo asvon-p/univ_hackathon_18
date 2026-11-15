@@ -8,7 +8,7 @@ import pytest
 from PIL import Image
 
 
-@pytest.mark.parametrize("live_api", [{"provider": "local", "invite_code": ""}], indirect=True)
+@pytest.mark.parametrize("live_api", [{"provider": "local"}], indirect=True)
 @pytest.mark.parametrize(
     "live_frontend", [{"body_photo": True}, {"body_photo": True, "mentor": True}], indirect=True
 )
@@ -24,6 +24,13 @@ def test_body_photo_screen_consent_upload_isolation_delete(live_frontend):
     )
     headers = {"Authorization": "Bearer " + ui.cookies["fitjang_token"]}
     assert 'href="/profile/body-photo' in ui.get("/profile").text
+    for path in ("/profile/body-photo", "/garments/new"):
+        photo_page = ui.get(path)
+        assert photo_page.status_code == 200
+        assert photo_page.headers["permissions-policy"].split(",")[0] == "camera=(self)"
+        assert 'id="btn-native-camera">기본 카메라로 찍기</button>' in photo_page.text
+        assert 'id="snap" accept="image/*" capture="environment"' in photo_page.text
+    assert ui.get("/profile").headers["permissions-policy"].split(",")[0] == "camera=()"
     assert 'name="consent_body_photo"' in ui.get("/profile/body-photo").text
     assert (
         backend.patch(

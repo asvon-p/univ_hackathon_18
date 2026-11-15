@@ -23,6 +23,7 @@ from shared.contracts import (
     RecommendationResult,
     UserContext,
 )
+from shared.recommendation_constraints import required_by_category
 
 log = logging.getLogger(__name__)
 
@@ -45,8 +46,22 @@ class MockRecommender:
     name = "mock"
 
     def recommend(self, context: UserContext, garments: list[GarmentAttributes]) -> RecommendationResult:
+        if context.style_reference is not None:
+            from recommendation.style_reference import recommend_reference
+
+            return recommend_reference(context, garments, relax_weather=True)
+        if context.day_plan is not None:
+            from recommendation.day_schedule import recommend_day
+
+            return recommend_day(context, garments)
         usable = usable_garments(context, garments)
         by_cat = {c: [g for g in usable if g.category == c] for c in RECOMMENDATION_CATEGORIES}
+        try:
+            required = required_by_category(context, usable)
+        except ValueError:
+            return RecommendationResult(recommendation_id="mock", outfits=[])
+        for category, garment in required.items():
+            by_cat[category] = [garment]
         if not (by_cat["top"] and by_cat["bottom"]):
             return RecommendationResult(recommendation_id="mock", outfits=[])
 
@@ -60,7 +75,9 @@ class MockRecommender:
         # 옷장이 커져도 대체 추천이 모든 조합을 메모리에 쌓지 않습니다.
         for category in ("top", "bottom"):
             by_cat[category] = sorted(by_cat[category], key=lambda g: -style_score(g))[:MAX_OUTFITS]
-        outer = max(by_cat["outerwear"], key=lambda o: o.thermal_level or 0) if need_outer else None
+        outer = required.get("outerwear") or (
+            max(by_cat["outerwear"], key=lambda o: o.thermal_level or 0) if need_outer else None
+        )
         combos = []
         for top, bottom in itertools.product(by_cat["top"], by_cat["bottom"]):
             items = [g for g in (top, bottom, outer) if g]
@@ -82,7 +99,11 @@ class MockRecommender:
                         outerwear=outer.garment_id if outer else None,
                     ),
                     style_tags=tags,
-                    reason=f"{context.temperature_c:g}°C 기준 사용 가능한 옷으로 만든 기본 조합",
+                    reason=(
+                        "선택한 옷을 유지한 기본 조합입니다. 기온 적합성은 직접 확인해 주세요"
+                        if required
+                        else f"{context.temperature_c:g}°C 기준 사용 가능한 옷으로 만든 기본 조합"
+                    ),
                     score=float(score),
                 )
             )
@@ -158,6 +179,12 @@ def validate_result(raw, context: UserContext, garments: list[GarmentAttributes]
         raise ValueError("recommendation_id 없음")
 
     usable = {g.garment_id: g for g in usable_garments(context, garments)}
+    try:
+        required_by_category(context, garments)
+    except ValueError:
+        return RecommendationResult(recommendation_id=raw["recommendation_id"], outfits=[]), [
+            "필수 의류 조건 충돌/사용 불가"
+        ]
     kept, dropped, seen = [], [], set()
     for index, item in enumerate(raw["outfits"]):
         try:
@@ -183,11 +210,41 @@ def validate_result(raw, context: UserContext, garments: list[GarmentAttributes]
             if problem:
                 break
         key = tuple(slots.values())
+        if problem is None and not set(context.required_garment_ids).issubset(set(slots.values())):
+            problem = "필수 의류 누락"
         if problem is None and key in seen:
             problem = "중복 조합"
         if problem:
             dropped.append(f"{outfit.outfit_id}: {problem}")
             continue
+        if context.style_reference is not None or context.day_plan is not None:
+            if context.style_reference is not None:
+                from recommendation.style_reference import evaluate
+            else:
+                from recommendation.day_schedule import evaluate
+
+                outfit.reference_matches = []
+
+            details = evaluate(
+                context,
+                usable[outfit.items.top],
+                usable[outfit.items.bottom],
+                usable.get(outfit.items.outerwear),
+            )
+            if details is None:
+                dropped.append(f"{outfit.outfit_id}: 확인된 일정 복장 조건 불충족")
+                continue
+            outfit = outfit.model_copy(update={**details, "score": details["score_components"]["total"]})
+        else:
+            outfit = outfit.model_copy(
+                update={
+                    "wearing_plan": [],
+                    "limitations": [],
+                    "score_components": {},
+                    "policy_version": None,
+                    "reference_matches": [],
+                }
+            )
         seen.add(key)
         kept.append(outfit)
         if len(kept) == MAX_OUTFITS:

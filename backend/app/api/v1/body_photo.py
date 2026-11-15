@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Response, UploadFile
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import Settings, get_settings
-from backend.app.deps import get_current_user_id, get_db, get_storage
+from backend.app.deps import get_current_user, get_current_user_id, get_db, get_storage
 from backend.app.schemas.body_photo import BodyPhotoResponse
 from backend.app.services.body_photo import BodyPhotoService
 from backend.app.storage.base import StoragePort
@@ -13,8 +13,10 @@ router = APIRouter(prefix="/api/v1/users/me/body-photo", tags=["body-photo"])
 HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
 
 
-def service(db: Session = Depends(get_db), storage: StoragePort = Depends(get_storage)) -> BodyPhotoService:
-    return BodyPhotoService(db, storage)
+def service(
+    db: Session = Depends(get_db), storage: StoragePort = Depends(get_storage), user=Depends(get_current_user)
+) -> BodyPhotoService:
+    return BodyPhotoService(db, storage, getattr(user, "_photo_session_key", None))
 
 
 @router.put("", response_model=BodyPhotoResponse)
@@ -36,7 +38,8 @@ def get_body_photo(user_id: UUID = Depends(get_current_user_id), photos: BodyPho
 
 @router.delete("", status_code=204)
 def delete_body_photo(
+    include_tryons: bool = False,
     user_id: UUID = Depends(get_current_user_id), photos: BodyPhotoService = Depends(service)
 ):
-    photos.delete(user_id)
+    photos.delete(user_id, include_tryons=include_tryons)
     return Response(status_code=204, headers=HEADERS)

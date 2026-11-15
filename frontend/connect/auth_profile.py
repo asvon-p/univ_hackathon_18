@@ -29,7 +29,7 @@ TODO(C 확인): gender 값("female"/"male"/"other"/null)은 contracts.py에 아�
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from . import USE_MOCK, ApiError, request, request_bytes
@@ -56,6 +56,9 @@ class Profile:
     gender: str | None = None
     body_photo_updated_at: str | None = None  # 읽기 전용: 전신 사진이 있으면 올린 시각
     user_id: str | None = None  # 서버가 확인한 소유자 ID (JWT 재발급 뒤에도 동일)
+    preferred_styles: list[str] = field(default_factory=list)
+    photo_policy: str = "persistent"
+    saved_tryons: list[dict] = field(default_factory=list)
 
     def to_json(self) -> dict:
         return {
@@ -74,6 +77,8 @@ class Profile:
             gender=data.get("gender"),
             body_photo_updated_at=data.get("body_photo_updated_at"),
             user_id=data.get("user_id"),
+            preferred_styles=data.get("preferred_styles") or [],
+            photo_policy=data.get("photo_policy", "persistent"),
         )
 
 
@@ -83,12 +88,12 @@ async def login(email: str, password: str) -> Token:
     return _token(await request("POST", "/auth/login", json={"email": email, "password": password}))
 
 
-async def signup(email: str, password: str, invite_code: str = "") -> Token:
+async def signup(email: str, password: str) -> Token:
     if USE_MOCK:
         return await _mock_signup(email, password)
     return _token(
         await request(
-            "POST", "/auth/signup", json={"email": email, "password": password, "invite_code": invite_code}
+            "POST", "/auth/signup", json={"email": email, "password": password}
         )
     )
 
@@ -101,7 +106,9 @@ async def get_profile(token: str) -> Profile:
             _MOCK_PROFILES.get(email, Profile()),
             body_photo_updated_at=photo[2] if photo else None,
         )
-    return Profile.from_json(await request("GET", "/users/me/profile", token=token))
+    profile = Profile.from_json(await request("GET", "/users/me/profile", token=token))
+    profile.saved_tryons = (await request("GET", "/tryon-results", token=token)).get("items", [])
+    return profile
 
 
 async def save_profile(token: str, profile: Profile, *, consent_body_info: bool | None = None) -> Profile:
@@ -146,11 +153,13 @@ async def fetch_body_photo(token: str) -> tuple[bytes, str]:
     return await request_bytes("GET", "/users/me/body-photo", token=token)
 
 
-async def delete_body_photo(token: str) -> None:
+async def delete_body_photo(token: str, *, include_tryons: bool = False) -> None:
     if USE_MOCK:
         _MOCK_BODY_PHOTOS.pop(mock_email(token), None)
         return
-    await request("DELETE", "/users/me/body-photo", token=token)
+    await request(
+        "DELETE", "/users/me/body-photo", token=token, params={"include_tryons": "true"} if include_tryons else None
+    )
 
 
 def _token(data: dict) -> Token:

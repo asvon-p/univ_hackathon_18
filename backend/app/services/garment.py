@@ -17,6 +17,7 @@ from backend.app.repositories.garments import GarmentRepository
 from backend.app.schemas.garment import GarmentPatch, GarmentView
 from backend.app.services.images import normalize_image, read_upload
 from backend.app.services.storage_cleanup import StorageCleanupService
+from backend.app.services.thumbnails import create_thumbnail, source_key, thumbnail_key
 from backend.app.services.user_lock import require_active_user
 from backend.app.storage.base import InvalidStorageKey, StoragePort
 from shared.contracts import Category, GarmentStatus
@@ -44,7 +45,16 @@ class GarmentService:
     def get(self, user_id: UUID, garment_id: UUID) -> GarmentView:
         return garment_view(self._owned(user_id, garment_id))
 
-    def upload(self, user_id: UUID, stream: BinaryIO, vision: SafeVision, max_bytes: int) -> GarmentView:
+    def upload(
+        self,
+        user_id: UUID,
+        stream: BinaryIO,
+        vision: SafeVision,
+        max_bytes: int,
+        *,
+        wearing_role: Category | None = None,
+        garment_type: str | None = None,
+    ) -> GarmentView:
         data = normalize_image(read_upload(stream, max_bytes))
         garment_id = uuid4()
         prefix = f"{user_id}/{garment_id}"
@@ -53,7 +63,17 @@ class GarmentService:
             id=garment_id,
             user_id=user_id,
             original_path=key,
-            attributes=GarmentAttribute(style_candidates=[]),
+            attributes=GarmentAttribute(
+                style_candidates=[],
+                category=wearing_role,
+                subcategory=garment_type,
+                user_edited_fields=[
+                    field
+                    for field, value in (("category", wearing_role), ("subcategory", garment_type))
+                    if value is not None
+                ],
+                source="user" if wearing_role is not None or garment_type is not None else "model",
+            ),
         )
         try:
             require_active_user(self.db, user_id)
@@ -76,6 +96,7 @@ class GarmentService:
             garment = self._owned(user_id, garment_id, lock=True)
             if self._apply_analysis(garment, outcome) and cutout:
                 garment.cutout_path = self._publish_cutout(cutout, prefix) or garment.cutout_path
+            self._prepare_thumbnail(garment)
             self.db.commit()
             return garment_view(garment)
         except Exception:
@@ -133,6 +154,7 @@ class GarmentService:
                 garment.cutout_path = (
                     self._publish_cutout(cutout, f"{user_id}/{garment_id}") or garment.cutout_path
                 )
+            self._prepare_thumbnail(garment)
             self.db.commit()
             return garment_view(garment)
         except OperationalError as exc:
@@ -161,9 +183,13 @@ class GarmentService:
         require_active_user(self.db, user_id)
         garment = self._owned(user_id, garment_id, lock=True)
         values = patch.model_dump(exclude_unset=True)
-        for field in ("status", "name", "location"):
+        if values.get("status") == "available" and garment.status == "laundry":
+            garment.wear_count = 0
+        for field in ("status", "name", "location", "wears_before_laundry"):
             if field in values:
                 setattr(garment, field, values.pop(field))
+        if garment.status == "available" and garment.wear_count >= garment.wears_before_laundry:
+            garment.status = "laundry"
         if values:
             for field, value in values.items():
                 setattr(garment.attributes, field, value)
@@ -176,6 +202,17 @@ class GarmentService:
                 garment.attributes.error = None
         if patch.model_fields_set:
             garment.updated_at = datetime.now(UTC)
+        self.db.commit()
+        return garment_view(garment)
+
+    def record_wear(self, user_id: UUID, garment_id: UUID) -> GarmentView:
+        require_active_user(self.db, user_id)
+        garment = self._owned(user_id, garment_id, lock=True)
+        if garment.status != "available":
+            raise AppError(409, ErrorCode.GARMENT_BUSY, "입을 수 있는 옷만 착용을 기록할 수 있어요")
+        garment.wear_count += 1
+        if garment.wear_count >= garment.wears_before_laundry:
+            garment.status = "laundry"
         self.db.commit()
         return garment_view(garment)
 
@@ -199,10 +236,45 @@ class GarmentService:
             log.exception("의류 삭제 완료, 파일 정리는 재시도 대기: %s", garment_id)
 
     def image(self, user_id: UUID, garment_id: UUID, kind: str) -> tuple[str, str]:
+        if kind == "thumbnail":
+            return self.thumbnail(user_id, garment_id)
         garment = self._owned(user_id, garment_id)
         # 분석 실패/누끼 미생성 시에도 원본을 표시합니다.
         key = garment.cutout_path if kind == "cutout" and garment.cutout_path else garment.original_path
         return self.media(user_id, key)
+
+    def _prepare_thumbnail(self, garment: Garment) -> str | None:
+        """Caller holds user + garment locks; cache failure must not lose the upload."""
+        try:
+            source = source_key(self.storage, garment)
+            key = thumbnail_key(garment, source)
+            if not self.storage.exists(key):
+                self.storage.save(key, create_thumbnail(self.storage, source))
+            return key
+        except (OSError, ValueError):
+            log.warning("의류 썸네일 생성 실패, 원본 표시로 대체: %s", garment.id, exc_info=True)
+            return None
+
+    def thumbnail(self, user_id: UUID, garment_id: UUID) -> tuple[str, str]:
+        # Authenticate ownership before looking up ANY cached file.
+        garment = self._owned(user_id, garment_id)
+        try:
+            key = thumbnail_key(garment, source_key(self.storage, garment))
+            if self.storage.exists(key):
+                return self.storage.local_path(key), "image/webp"
+        except (OSError, InvalidStorageKey):
+            pass
+        # Serialize cache misses across both backend processes, reanalysis and deletion.
+        # In particular, a late GET must never recreate a deleted user's folder.
+        require_active_user(self.db, user_id)
+        garment = self._owned(user_id, garment_id, lock=True)
+        if key := self._prepare_thumbnail(garment):
+            return self.storage.local_path(key), "image/webp"
+        try:
+            source = source_key(self.storage, garment)
+        except (OSError, InvalidStorageKey) as exc:
+            raise AppError(404, ErrorCode.GARMENT_IMAGE_NOT_FOUND, "이미지를 찾을 수 없습니다") from exc
+        return self.media(user_id, source)
 
     def media(self, user_id: UUID, key: str) -> tuple[str, str]:
         parts = PurePosixPath(key).parts

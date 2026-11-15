@@ -72,7 +72,7 @@ Python 3.12를 확인하며 `APP_ENV=demo`, 두 어댑터의 `local` 설정은 �
 
 1. `POST /api/v1/auth/login`에 `.env.demo`의 이메일·비밀번호를 입력합니다. 반환 토큰을 **Authorize**에 넣습니다.
 2. `GET /api/v1/garments`로 12벌과 `available/laundry/inactive` 상태를 확인합니다. 이미지 요청에도 인증 헤더가 필요합니다.
-3. 새 사용자의 흐름을 보이려면 `auth/signup` → `auth/login` → 사진 3장 이상 업로드 순서로 진행합니다. `SIGNUP_INVITE_CODE`가 설정돼 있다면 가입 본문에 입력합니다.
+3. 새 사용자의 흐름을 보이려면 `auth/signup` → `auth/login` → 사진 3장 이상 업로드 순서로 진행합니다. 이메일·비밀번호로 가입하며 초대 코드는 사용하지 않습니다.
 4. 현재 B의 임시 모듈은 모든 사진을 상의로 분류하므로 `PATCH /garments/{id}`로 상의·하의·신발을 각각 설정합니다. 실제 모델이 연결돼도 사용자의 속성 수정 기능으로 쓸 수 있습니다.
 5. `POST /api/v1/recommendations`에 `{"temperature_c": 8, "occasion": "daily"}`를 보냅니다. 201과 `provider`, `is_fallback`, 코디·이미지 맵을 확인합니다.
 6. 반환된 추천·코디 UUID로 `POST /recommendations/{id}/feedback`에 `{"recommendation_id": "...", "outfit_id": "...", "accepted": true, "reason": "마음에 들어요"}`를 보냅니다. 거절은 `accepted: false`입니다.

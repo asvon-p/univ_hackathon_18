@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import bcrypt
 import jwt
@@ -28,7 +28,7 @@ def dummy_password_hash() -> str:
     return hash_password("not-an-account-password")
 
 
-def create_access_token(user_id: UUID, settings: Settings) -> str:
+def create_access_token(user_id: UUID, settings: Settings, *, token_version: int = 0) -> str:
     settings.validate_auth()
     now = datetime.now(UTC)
     return jwt.encode(
@@ -37,13 +37,15 @@ def create_access_token(user_id: UUID, settings: Settings) -> str:
             "iat": now,
             "exp": now + timedelta(minutes=settings.JWT_EXPIRE_MINUTES),
             "type": "access",
+            "jti": str(uuid4()),
+            "ver": token_version,
         },
         settings.JWT_SECRET,
         algorithm="HS256",
     )
 
 
-def decode_access_token(token: str, settings: Settings) -> UUID:
+def decode_access_token(token: str, settings: Settings) -> tuple[UUID, int]:
     settings.validate_auth()
     try:
         payload = jwt.decode(
@@ -54,7 +56,10 @@ def decode_access_token(token: str, settings: Settings) -> UUID:
         )
         if payload["type"] != "access" or type(payload["iat"]) is not int or type(payload["exp"]) is not int:
             raise ValueError("invalid claims")
-        return UUID(payload["sub"])
+        version = payload.get("ver", 0)
+        if type(version) is not int or version < 0:
+            raise ValueError("invalid token version")
+        return UUID(payload["sub"]), version
     except jwt.ExpiredSignatureError as exc:
         raise AppError(401, ErrorCode.AUTH_TOKEN_EXPIRED, "로그인이 만료되었습니다") from exc
     except (jwt.InvalidTokenError, ValueError, TypeError, AttributeError) as exc:

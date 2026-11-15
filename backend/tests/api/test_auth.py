@@ -44,22 +44,29 @@ def test_signup_login_me_and_default_profile(api_client, db_session):
     assert profile["consent_body_info_at"] is None
 
 
-def test_duplicate_email_and_invite_code(api_client, db_session):
-    settings = get_settings().model_copy(update={"SIGNUP_INVITE_CODE": "대학-초대-2026"})
-    api_client.app.dependency_overrides[get_settings] = lambda: settings
-    for code in (None, "wrong"):
-        response = api_client.post("/api/v1/auth/signup", json=signup_body(invite_code=code))
-        assert response.status_code == 403 and response.json()["code"] == "INVITE_CODE_INVALID"
-    assert db_session.scalar(select(func.count()).select_from(User)) == 0
-    assert (
-        api_client.post("/api/v1/auth/signup", json=signup_body(invite_code="대학-초대-2026")).status_code
-        == 201
-    )
+def test_duplicate_email(api_client, db_session):
+    assert api_client.post("/api/v1/auth/signup", json=signup_body()).status_code == 201
     duplicate = api_client.post(
-        "/api/v1/auth/signup", json=signup_body(email="student@example.com", invite_code="대학-초대-2026")
+        "/api/v1/auth/signup", json=signup_body(email="student@example.com")
     )
     assert duplicate.status_code == 409 and duplicate.json()["code"] == "EMAIL_ALREADY_EXISTS"
     assert db_session.scalar(select(func.count()).select_from(User)) == 1
+
+
+def test_removed_invitation_field_rejected_without_creating_user(api_client, db_session):
+    response = api_client.post("/api/v1/auth/signup", json=signup_body(invite_code="obsolete"))
+    assert response.status_code == 422
+    assert db_session.scalar(select(func.count()).select_from(User)) == 0
+
+
+def test_legacy_invitation_environment_cannot_restrict_signup(api_client, monkeypatch):
+    from backend.app.core.config import Settings
+
+    monkeypatch.setenv("SIGNUP_INVITE_CODE", "unused-legacy-value")
+    settings = Settings()
+    assert "SIGNUP_INVITE_CODE" not in type(settings).model_fields
+    api_client.app.dependency_overrides[get_settings] = lambda: settings
+    assert api_client.post("/api/v1/auth/signup", json=signup_body()).status_code == 201
 
 
 @pytest.mark.parametrize(

@@ -24,7 +24,7 @@ from vision.attributes import infer_attributes
 from vision.colors import dominant_color
 
 log = logging.getLogger(__name__)
-VERSION = "vision-baseline-0.2"
+VERSION = "vision-baseline-0.3"
 
 
 @dataclass(frozen=True)
@@ -113,12 +113,10 @@ def _clip_model(device="cpu"):
 
 @lru_cache(maxsize=1)
 def _rembg_session():
-    from rembg import new_session
+    # Keep the existing setting name; use the same U2-Net model without optional numba DLLs.
+    from vision.u2net import U2NetCutout
 
-    os.environ.setdefault(
-        "U2NET_HOME", str(Path(__file__).resolve().parents[1] / ".demo/vision-runtime/rembg")
-    )
-    return new_session("u2net", providers=["CPUExecutionProvider"])
+    return U2NetCutout()
 
 
 def warmup(options: Pipeline | None = None) -> None:
@@ -197,10 +195,7 @@ def _get_cutout(image: Image.Image, options: Pipeline) -> Image.Image | None:
     if mode == "flat":
         return _flat_background_cutout(image)
     if mode == "rembg":
-        from rembg import remove
-
-        out = remove(image.convert("RGB"), session=_rembg_session())
-        return out.convert("RGBA")
+        return _rembg_session().remove(image)
     raise ValueError(f"unsupported VISION_SEGMENTATION: {mode}")
 
 
@@ -222,7 +217,14 @@ def extract(image_path: str, garment_id: str, options: Pipeline | None = None) -
         try:
             cutout = _get_cutout(image, options)
         except Exception as exc:
-            log.warning("cutout unavailable: %s", exc)
+            log.warning("cutout unavailable: %s", type(exc).__name__)
+            if options.segmentation == "rembg":
+                # Required production background removal must not silently report success.
+                return VisionResult(
+                    success=False,
+                    model_version=version,
+                    error=f"background removal failed: {type(exc).__name__}",
+                )
         # Use the foreground against a neutral background for all CLIP labels.
         # This avoids treating a patterned room as the garment's pattern/style.
         subject = image

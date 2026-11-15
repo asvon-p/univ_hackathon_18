@@ -110,6 +110,7 @@ class LocalResult:
     saved: list[Path] = field(default_factory=list)
     category: str = ""
     garment_photo_type: str = ""
+    layering: dict | None = None
 
 
 def run_tryon(
@@ -124,7 +125,10 @@ def run_tryon(
     segmentation_free: bool = True,
     save_prefix: str | None = None,
     device: str | None = None,
+    preserve_inner: bool = False,
 ) -> LocalResult:
+    if preserve_inner and category != "tops":
+        raise ValueError("preserve_inner requires tops")
     if category == "auto" and not isinstance(garment, Image.Image):
         category = category_from_path(garment) or "auto"
     if category not in CATEGORIES:
@@ -140,7 +144,20 @@ def run_tryon(
     if not isinstance(garment, Image.Image):
         garment = Image.open(garment)
     person = person.convert("RGB")
-    garment = garment.convert("RGB")
+    import json
+
+    try:
+        opening_polygon = json.loads(garment.info.get("fitjang_opening", "[]"))
+        from shared.garment_layers import validate_opening
+
+        opening_polygon = validate_opening(opening_polygon)
+    except (ValueError, TypeError):
+        opening_polygon = []
+    opening_mode = garment.info.get("fitjang_opening_mode", "legacy")
+    garment_rgba = garment.convert("RGBA")
+    background = Image.new("RGB", garment.size, "white")
+    background.paste(garment_rgba, mask=garment_rgba.getchannel("A"))
+    garment = background
 
     pipe = get_pipeline(device)
     if garment_photo_type == "auto":
@@ -159,6 +176,41 @@ def run_tryon(
         seed=int(seed),
         segmentation_free=bool(segmentation_free),
     )
+    images = list(out.images)
+    layering = None
+    if preserve_inner and opening_mode == "off":
+        layering = {"status": "not_requested", "reason": "opening_disabled", "preserved_pixels": 0}
+    if preserve_inner and opening_mode != "off":
+        from tryon_server.layering import guided_inner_top, preserve_inner_top
+
+        # Keep all masks/images in RAM. The parser identifies clothing regions,
+        # not people; it creates no identity template or training example.
+        before_labels = pipe.hp_model.predict(person)
+        garment_labels = pipe.hp_model.predict(garment)
+        restored = []
+        for generated in images:
+            generated_labels = pipe.hp_model.predict(generated)
+            image, layering = preserve_inner_top(
+                person,
+                generated,
+                garment,
+                before_labels,
+                generated_labels,
+                garment_labels,
+            )
+            if opening_polygon or layering["status"] == "skipped":
+                image, layering = guided_inner_top(
+                    person,
+                    generated,
+                    garment_rgba,
+                    before_labels,
+                    generated_labels,
+                    opening_polygon,
+                )
+                if opening_polygon and opening_mode == "auto":
+                    layering["reason"] = "automatic_opening"
+            restored.append(image)
+        images = restored
     elapsed = time.time() - t0
     peak = torch.cuda.max_memory_allocated() / 1024**3 if pipe.device.type == "cuda" else None
 
@@ -166,15 +218,16 @@ def run_tryon(
     if save_prefix is not None:
         OUT_DIR.mkdir(exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        for i, im in enumerate(out.images):
+        for i, im in enumerate(images):
             p = OUT_DIR / f"{stamp}_{save_prefix}_{category}_s{seed}_{i}.png"
             im.save(p)
             saved.append(p)
     return LocalResult(
-        images=list(out.images),
+        images=images,
         elapsed_sec=elapsed,
         peak_vram_gb=peak,
         saved=saved,
         category=category,
         garment_photo_type=garment_photo_type,
+        layering=layering,
     )

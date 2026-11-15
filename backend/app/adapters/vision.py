@@ -93,11 +93,19 @@ class SafeVision:
         self.name = inner.name
         self.timeout_sec = timeout_sec
         self._gpu_lock = threading.Lock()  # GPU 모델은 한 번에 하나만 실행
+        self.warmup_error = None
 
     def warmup(self) -> None:
         warm = getattr(self.inner, "warmup", None)
         if callable(warm):
-            warm()
+            try:
+                warm()
+                self.warmup_error = None
+            except ImportError as exc:
+                # An optional image model dependency must not take down login/wardrobe/recommendations.
+                # Upload/reanalysis retains its explicit failure + manual-edit/retry flow.
+                self.warmup_error = type(exc).__name__
+                log.warning("Vision dependency unavailable (%s); analysis needs repair", self.warmup_error)
 
     def _locked_extract(self, image_path: str, garment_id: str) -> VisionResult:
         with self._gpu_lock:
@@ -137,10 +145,15 @@ class SafeVision:
         return VisionOutcome(result=result, provider=self.name, latency_ms=latency), cutout
 
     def _isolated_extract(
-        self, image: bytes, user_id: str, garment_id: str, max_bytes: int
+        self, image: bytes, user_id: str, garment_id: str, max_bytes: int, *, reference_only=False
     ) -> tuple[VisionResult, bytes | None]:
         # 임시 폴더의 수명은 응답 timeout이 아니라 실제 모델 작업 종료까지입니다.
-        with TemporaryDirectory(prefix="fitjang-reanalysis-") as root:
+        from backend.app.services.reference_temporary import work_root
+
+        options = (
+            {"prefix": "task-", "dir": work_root()} if reference_only else {"prefix": "fitjang-reanalysis-"}
+        )
+        with TemporaryDirectory(**options) as root:
             folder = Path(root) / user_id / garment_id
             folder.mkdir(parents=True)
             original = folder / "original.jpg"
@@ -158,6 +171,9 @@ class SafeVision:
                 return result, data if len(data) <= max_bytes else None
             except OSError:
                 return result, None
+
+    def _reference_extract(self, image, user_id, reference_id, max_bytes):
+        return self._isolated_extract(image, user_id, reference_id, max_bytes, reference_only=True)
 
     @staticmethod
     def _validate(raw, garment_id: str) -> VisionResult:

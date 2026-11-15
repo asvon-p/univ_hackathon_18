@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
@@ -13,6 +14,159 @@ from sqlalchemy import inspect, text
 
 from backend.app.db.base import Base
 from backend.app.schemas.garment import ANALYSIS_FIELDS
+
+
+@pytest.fixture(autouse=True)
+def require_isolated_migration_schema(db_session):
+    """Never downgrade a public/demo schema, even if a test fixture is misconfigured."""
+    if os.environ.get("TEST_POSTGRES") == "1":
+        schema = db_session.connection().scalar(text("SELECT current_schema()"))
+        assert re.fullmatch(r"test_garments_[0-9a-f]{32}", schema), schema
+
+
+@pytest.mark.skipif(os.environ.get("TEST_POSTGRES") != "1", reason="PostgreSQL migration test")
+def test_starter_flag_preserves_all_legacy_garment_values(db_session, auth_account):
+    connection = db_session.connection()
+    config = Config("backend/alembic.ini")
+    config.attributes["connection"] = connection
+    command.downgrade(config, "0023")
+    connection.execute(
+        text("INSERT INTO garments (id,user_id,original_path,name) VALUES (:id,:user,'legacy.jpg','보존')"),
+        {"id": uuid4(), "user": auth_account["id"]},
+    )
+    before = connection.execute(text("SELECT to_jsonb(g) FROM garments g")).scalar_one()
+    command.upgrade(config, "head")
+    after = connection.execute(text("SELECT to_jsonb(g) FROM garments g")).scalar_one()
+    assert after.pop("is_example") is False
+    assert after == before
+
+
+@pytest.mark.skipif(os.environ.get("TEST_POSTGRES") != "1", reason="PostgreSQL migration test")
+def test_auto_opening_upgrade_preserves_manual_polygons(db_session, auth_account):
+    connection = db_session.connection()
+    config = Config("backend/alembic.ini")
+    config.attributes["connection"] = connection
+    command.downgrade(config, "0021")
+    ids = [uuid4(), uuid4()]
+    polygon = [[0.4, 0.1], [0.6, 0.1], [0.65, 0.9], [0.35, 0.9]]
+    for gid, points in zip(ids, [[], polygon], strict=True):
+        connection.execute(
+            text(
+                "INSERT INTO garments (id,user_id,original_path,opening_polygon) "
+                "VALUES (:id,:user,'preserve.jpg',:points)"
+            ),
+            {"id": gid, "user": auth_account["id"], "points": json.dumps(points)},
+        )
+    before = connection.execute(text("SELECT to_jsonb(g) FROM garments g ORDER BY id")).scalars().all()
+    command.upgrade(config, "head")
+    after = (
+        connection.execute(text("SELECT to_jsonb(g)-'opening_mode'-'is_example' FROM garments g ORDER BY id"))
+        .scalars()
+        .all()
+    )
+    assert before == after
+    modes = dict(connection.execute(text("SELECT id,opening_mode FROM garments")).all())
+    assert modes[ids[0]] == "auto" and modes[ids[1]] == "manual"
+
+
+@pytest.mark.skipif(os.environ.get("TEST_POSTGRES") != "1", reason="PostgreSQL migration test")
+def test_recommendation_request_upgrade_preserves_existing_results(db_session, auth_account):
+    connection = db_session.connection()
+    config = Config("backend/alembic.ini")
+    config.attributes["connection"] = connection
+    command.downgrade(config, "0019")
+    connection.execute(
+        text(
+            "INSERT INTO recommendations (id,user_id,context,provider,latency_ms) "
+            "VALUES (:id,:user,'{}','local',12)"
+        ),
+        {"id": uuid4(), "user": auth_account["id"]},
+    )
+    before = connection.execute(text("SELECT to_jsonb(r) FROM recommendations r")).scalar_one()
+    command.upgrade(config, "head")
+    after = connection.execute(text("SELECT to_jsonb(r) FROM recommendations r")).scalar_one()
+    assert after == before
+    assert connection.scalar(text("SELECT count(*) FROM recommendation_requests")) == 0
+
+
+@pytest.mark.skipif(os.environ.get("TEST_POSTGRES") != "1", reason="PostgreSQL migration test")
+def test_reference_keyword_upgrade_preserves_legacy_identity_and_features(db_session, auth_account, storage):
+    from backend.app.db.models import StyleReference
+    from backend.app.services.storage_cleanup import ReferenceCleanupService
+
+    connection = db_session.connection()
+    config = Config("backend/alembic.ini")
+    config.attributes["connection"] = connection
+    command.downgrade(config, "0018")
+    rid = uuid4()
+    connection.execute(
+        text(
+            "INSERT INTO style_references "
+            "(id,user_id,version,status,image_path,features,regions,notes,focus) "
+            "VALUES (:id,:user,7,'ready',:path,:features,'[]','[]','color')"
+        ),
+        {
+            "id": rid,
+            "user": auth_account["id"],
+            "path": f"{auth_account['id']}/style-references/{rid}/original.jpg",
+            "features": json.dumps([{"category": "top", "color": "red", "extraction": "manual"}]),
+        },
+    )
+    before = connection.execute(
+        text("SELECT to_jsonb(r) FROM style_references r WHERE id=:id"), {"id": rid}
+    ).scalar_one()
+    command.upgrade(config, "head")
+    after = connection.execute(
+        text("SELECT to_jsonb(r) FROM style_references r WHERE id=:id"), {"id": rid}
+    ).scalar_one()
+    assert {key: after[key] for key in before} == before
+    assert after["image_expires_at"] is not None
+    cleanup = ReferenceCleanupService(db_session, storage)
+    assert cleanup.expire() == 1
+    assert cleanup.drain()["completed"] == 1
+    row = db_session.get(StyleReference, rid)
+    assert row.version == 7 and row.features == before["features"] and row.status == "ready"
+    assert row.image_path is None
+
+
+@pytest.mark.skipif(os.environ.get("TEST_POSTGRES") != "1", reason="PostgreSQL migration test")
+def test_photo_policy_upgrade_does_not_reactivate_session_token(db_session, api_client, auth_account):
+    connection = db_session.connection()
+    config = Config("backend/alembic.ini")
+    config.attributes["connection"] = connection
+    command.downgrade(config, "0015")
+    connection.execute(
+        text("UPDATE users SET photo_policy = 'session' WHERE id = :id"), {"id": auth_account["id"]}
+    )
+    command.upgrade(config, "head")
+    db_session.expire_all()
+    assert api_client.get("/api/v1/auth/me", headers=auth_account["headers"]).status_code == 401
+    login = api_client.post(
+        "/api/v1/auth/login", json={"email": auth_account["email"], "password": auth_account["password"]}
+    )
+    assert login.status_code == 200
+    headers = {"Authorization": "Bearer " + login.json()["access_token"]}
+    assert api_client.get("/api/v1/profile", headers=headers).json()["photo_policy"] == "persistent"
+
+
+@pytest.mark.skipif(os.environ.get("TEST_POSTGRES") != "1", reason="PostgreSQL migration test")
+def test_layering_upgrade_preserves_existing_result_ids_and_image_references(db_session, auth_account):
+    connection = db_session.connection()
+    config = Config("backend/alembic.ini")
+    config.attributes["connection"] = connection
+    command.downgrade(config, "0014")
+    connection.execute(
+        text(
+            "INSERT INTO tryon_results (id,user_id,photo_id,photo_version,items,names,image_id) "
+            "VALUES (:id,:user,:photo,'original','{}','[]',:image)"
+        ),
+        {"id": uuid4(), "user": auth_account["id"], "photo": uuid4(), "image": uuid4()},
+    )
+    before = connection.execute(text("SELECT to_jsonb(r) FROM tryon_results r")).scalar_one()
+    command.upgrade(config, "head")
+    after = connection.execute(text("SELECT to_jsonb(r) FROM tryon_results r")).scalar_one()
+    assert {k: after[k] for k in before} == before
+    assert after["render_version"] == "legacy" and after["layering_status"] == "not_requested"
 
 
 @pytest.mark.skipif(

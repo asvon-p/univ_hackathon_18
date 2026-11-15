@@ -315,7 +315,11 @@ def test_next_local_recommendation_receives_only_own_recent_feedback(
     )
     assert api_client.delete(f"/api/v1/garments/{closet['top']}", headers=headers).status_code == 204
     add_garment(auth_account, "top")
-    after_delete = api_client.post("/api/v1/recommendations", headers=headers, json={"temperature_c": 20})
+    after_delete = api_client.post(
+        "/api/v1/recommendations",
+        headers={**headers, "Idempotency-Key": str(uuid4())},
+        json={"temperature_c": 20},
+    )
     assert after_delete.status_code == 201 and seen[-1]["recent_feedback"] == []
 
 

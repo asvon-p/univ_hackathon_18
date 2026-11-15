@@ -18,6 +18,7 @@ def garment_view(garment: Garment) -> GarmentView:
     attributes = garment.attributes
     return GarmentView(
         garment_id=str(garment.id),
+        is_example=garment.is_example,
         name=garment.name,
         location=garment.location,
         category=attributes.category,
@@ -27,11 +28,16 @@ def garment_view(garment: Garment) -> GarmentView:
         style_candidates=attributes.style_candidates,
         thermal_level=attributes.thermal_level,
         status=garment.status,
+        wears_before_laundry=garment.wears_before_laundry,
+        wear_count=garment.wear_count,
         cutout_path=garment.cutout_path,
         image_url=f"/media/{garment.original_path}",
         cutout_url=f"/media/{garment.cutout_path}" if garment.cutout_path else None,
         analysis_status=garment.analysis_status,
         source=attributes.source,
+        role_source=("user" if "category" in attributes.user_edited_fields else "model")
+        if attributes.category is not None
+        else None,
         model_version=attributes.model_version,
         error=attributes.error,
         analyzed_at=_utc(attributes.analyzed_at),
@@ -59,6 +65,7 @@ def recommendation_view(record: Recommendation, garments: dict[str, GarmentView]
             style_tags=row.style_tags,
             reason=row.reason,
             score=row.score,
+            **(row.details or {}),
         )
         for row in record.outfits
     ]

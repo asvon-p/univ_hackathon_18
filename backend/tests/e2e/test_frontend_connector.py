@@ -16,9 +16,7 @@ from shared.contracts import FeedbackEvent, UserContext
 
 
 @pytest.mark.skipif(not os.environ.get("TEAM_FRONTEND_ROOT"), reason="D checkout: TEAM_FRONTEND_ROOT 필요")
-@pytest.mark.parametrize(
-    "live_api", [{"provider": "local", "invite_code": "", "weather_stub": True}], indirect=True
-)
+@pytest.mark.parametrize("live_api", [{"provider": "local", "weather_stub": True}], indirect=True)
 def test_team_frontend_connectors_over_real_http_and_postgres(live_api, monkeypatch):
     client, _, _ = live_api
     source = Path(os.environ["TEAM_FRONTEND_ROOT"]).resolve() / "connect"

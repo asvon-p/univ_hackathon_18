@@ -10,27 +10,32 @@ from scripts.frontend_preview import ROOT, deny_dotenv
 
 RUNTIME = ROOT / ".demo" / "tryon-runtime"
 CREDENTIALS = RUNTIME / "credentials.json"
-PORT = 8010
+PORT = int(os.environ.get("TRYON_PORT", "8010"))
 
 
-def runtime_environment() -> tuple[Path, dict[str, str]]:
-    python = RUNTIME / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    if not python.is_file() or not (RUNTIME / "weights/model.safetensors").is_file():
+def runtime_environment(root: Path = ROOT) -> tuple[Path, dict[str, str]]:
+    runtime = root / ".demo" / "tryon-runtime"
+    credentials = runtime / "credentials.json"
+    python = runtime / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not python.is_file() or not (runtime / "weights/model.safetensors").is_file():
         raise RuntimeError("GPU runtime is not installed; see docs/LOCAL_TRYON.md")
-    if not CREDENTIALS.exists():
-        with CREDENTIALS.open("x", encoding="utf-8") as stream:
+    if not credentials.exists():
+        with credentials.open("x", encoding="utf-8") as stream:
             json.dump({"api_key": secrets.token_urlsafe(48)}, stream)
-    key = json.loads(CREDENTIALS.read_text(encoding="utf-8"))["api_key"]
+    key = json.loads(credentials.read_text(encoding="utf-8"))["api_key"]
     if not isinstance(key, str) or len(key) < 32:
         raise RuntimeError("Invalid GPU credentials; existing credentials were not overwritten")
     return python, {
         "FITJANG_SKIP_DOTENV": "1",
         "FRONTEND_BODY_PHOTO_ENABLED": "true",
         "TRYON_API_URL": f"http://127.0.0.1:{PORT}",
+        "TRYON_PORT": str(PORT),
         "TRYON_API_KEY": key,
-        "FASHN_WEIGHTS_DIR": str(RUNTIME / "weights"),
-        "FASHN_OUTPUT_DIR": str(RUNTIME / "outputs"),
-        "HF_HOME": str(RUNTIME / "huggingface"),
+        "TRYON_MAINTENANCE_FILE": str(runtime / "maintenance.json"),
+        "TRYON_TIMING_FILE": str(runtime / "timing-v1.json"),
+        "FASHN_WEIGHTS_DIR": str(runtime / "weights"),
+        "FASHN_OUTPUT_DIR": str(runtime / "outputs"),
+        "HF_HOME": str(runtime / "huggingface"),
         "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
         "HF_HUB_DISABLE_TELEMETRY": "1",
     }

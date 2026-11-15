@@ -11,7 +11,7 @@ from shared.contracts import GarmentAttributes, UserContext
 GARMENTS = [
     GarmentAttributes(garment_id="private-top", category="top", color="white"),
     GarmentAttributes(garment_id="private-bottom", category="bottom", color="black"),
-    GarmentAttributes(garment_id="private-outer", category="outerwear", color="navy"),
+    GarmentAttributes(garment_id="private-outer", category="outerwear", subcategory="shirt", color="navy"),
     GarmentAttributes(garment_id="legacy-shoes", category="shoes"),
 ]
 CONTEXT = UserContext(user_id="private-user", temperature_c=18, preferred_styles=["꾸안꾸"])
@@ -38,6 +38,23 @@ def completed(rows):
     }
 
 
+def test_receipt_storage_failure_prevents_paid_http_and_falls_back(monkeypatch):
+    from backend.app.services import api_usage
+
+    def fail_receipt(*args):
+        raise RuntimeError("receipt database unavailable")
+
+    seen = []
+    monkeypatch.setattr(api_usage, "begin_usage", fail_receipt)
+    engine = OpenAIRecommender(
+        settings(API_USAGE_ENABLED=True), transport=httpx.MockTransport(lambda r: seen.append(r))
+    )
+    result = SafeRecommender(engine, 1, LocalFallback()).recommend(CONTEXT, GARMENTS)
+    assert result.is_fallback and result.provider == "fallback"
+    assert result.result.outfits
+    assert not seen
+
+
 def test_openai_ranks_only_local_candidates_using_responses_schema():
     seen = []
 
@@ -46,6 +63,11 @@ def test_openai_ranks_only_local_candidates_using_responses_schema():
         body = json.loads(request.content)
         seen.append(body)
         data = json.loads(body["input"])
+        assert "category는 착용 역할" in body["instructions"]
+        for candidate in data["candidates"]:
+            outer = candidate["items"].get("outerwear")
+            if outer:
+                assert outer["category"] == "outerwear" and outer["subcategory"] == "shirt"
         count = len(data["candidates"])
         return httpx.Response(
             200,
@@ -134,3 +156,86 @@ def test_local_fallback_still_works_when_weather_eliminates_every_candidate():
     result = LocalFallback().recommend(UserContext(user_id="u", temperature_c=30), thick)
     assert result.outfits and result.outfits[0].items.shoes is None
     assert result.outfits[0].items.outerwear is None
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_gpt_judges_only_candidates_containing_required_items(fail):
+    context = CONTEXT.model_copy(update={"temperature_c": 30, "required_garment_ids": ["private-outer"]})
+    seen = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        payload = json.loads(body["input"])
+        seen.append(payload)
+        assert body["model"] == "gpt-6-luna"
+        assert "tools" not in body and body["store"] is False
+        assert payload["required_slots"] == ["outerwear"]
+        assert all("outerwear" in c["items"] for c in payload["candidates"])
+        assert "private-" not in body["input"]
+        if fail:
+            return httpx.Response(503)
+        return httpx.Response(
+            200,
+            json=completed(
+                [
+                    {"candidate_id": c["candidate_id"], "reason": "제공된 후보 판단"}
+                    for c in reversed(payload["candidates"])
+                ]
+            ),
+        )
+
+    engine = OpenAIRecommender(settings(), transport=httpx.MockTransport(respond))
+    outcome = SafeRecommender(engine, 1, LocalFallback()).recommend(context, GARMENTS)
+    assert seen and outcome.is_fallback == fail
+    assert outcome.result.outfits
+    assert all(o.items.outerwear == "private-outer" for o in outcome.result.outfits)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_reference_and_schedule_judgment_has_no_photos_or_private_ids(fail):
+    from backend.tests.api.test_day_plans import plan_body
+    from shared.contracts import DayPlanSnapshot, StyleReferenceSnapshot
+
+    context = CONTEXT.model_copy(
+        update={
+            "required_garment_ids": ["private-top"],
+            "day_plan": DayPlanSnapshot(id="private-plan", version=1, **plan_body()),
+            "style_reference": StyleReferenceSnapshot(
+                id="private-reference",
+                version=1,
+                features=[{"category": "top", "color": "white", "style_candidates": ["minimal"]}],
+            ),
+        }
+    )
+    seen = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        payload = json.loads(body["input"])
+        seen.append(payload)
+        assert payload["reference_features"][0]["color"] == "white"
+        assert len(payload["schedule"]) == 2
+        assert all(c["reference_judgment"] for c in payload["candidates"])
+        assert "private-" not in body["input"] and "image" not in body["input"]
+        assert "extraction" not in body["input"] and body["store"] is False
+        if fail:
+            return httpx.Response(503)
+        return httpx.Response(
+            200,
+            json=completed(
+                [
+                    {"candidate_id": c["candidate_id"], "reason": "확인된 특징 비교"}
+                    for c in reversed(payload["candidates"])
+                ]
+            ),
+        )
+
+    outcome = SafeRecommender(
+        OpenAIRecommender(settings(), transport=httpx.MockTransport(respond)), 2, LocalFallback()
+    ).recommend(context, GARMENTS)
+    assert seen and outcome.is_fallback == fail
+    assert outcome.result.outfits
+    assert all(
+        o.items.top == "private-top" and len(o.wearing_plan) == 2 and o.reference_matches
+        for o in outcome.result.outfits
+    )

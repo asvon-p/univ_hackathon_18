@@ -15,11 +15,10 @@ def test_signup_to_wardrobe_recommendation_feedback_over_real_http(live_api, tmp
     client, provider, _ = live_api
     started = time.perf_counter()
     health = client.get("/health").json()
-    assert health["db"] == "ok" and health["contract_version"] == "2.0"
+    assert health["db"] == "ok" and health["contract_version"] == "2.4"
     assert health["adapters"]["vision"] == health["adapters"]["recommender"] == provider
     email, password = f"e2e-{uuid4().hex}@example.com", "e2e-only-password-123"
-    signup = {"email": email, "password": password, "nickname": "통합 시연", "invite_code": "e2e-invite-only"}
-    assert client.post("/api/v1/auth/signup", json={**signup, "invite_code": "wrong"}).status_code == 403
+    signup = {"email": email, "password": password, "nickname": "통합 시연"}
     created = client.post("/api/v1/auth/signup", json=signup)
     assert created.status_code == 201
     user_id = created.json()["id"]

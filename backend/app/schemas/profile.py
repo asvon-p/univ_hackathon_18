@@ -52,6 +52,7 @@ class ProfilePatch(BaseModel):
 
 
 class ProfileView(BaseModel):
+    photo_policy: str = "persistent"
     user_id: UUID
     nickname: str
     gender: str | None = None

@@ -1,4 +1,4 @@
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, func, select
@@ -21,7 +21,12 @@ def rate_clock(monkeypatch):
 
 
 def post(client, account, **kwargs):
-    return client.post(PATH, headers=account["headers"], json={"temperature_c": 5}, **kwargs)
+    return client.post(
+        PATH,
+        headers={**account["headers"], "Idempotency-Key": str(uuid4())},
+        json={"temperature_c": 5},
+        **kwargs,
+    )
 
 
 def test_ten_requests_then_429_without_engine_or_result_write(

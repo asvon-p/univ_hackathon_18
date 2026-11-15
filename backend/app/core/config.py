@@ -32,9 +32,11 @@ class Settings(BaseSettings):
 
     STORAGE_DIR: Path = ROOT_DIR / "storage"
     MAX_UPLOAD_MB: int = 10
+    STARTER_WARDROBE_ENABLED: bool = True
     STORAGE_DELETE_RETRY_SECONDS: float = Field(default=30, ge=0)  # 0: 자동 재시도 비활성화
 
     VISION_PROVIDER: Literal["mock", "local"] = "mock"
+    API_USAGE_ENABLED: bool = True
     VISION_CLASSIFIER: Literal["demo", "clip"] = "clip"
     VISION_SEGMENTATION: Literal["off", "flat", "rembg"] = "rembg"
     VISION_DEVICE: Literal["cpu", "auto", "cuda", "mps"] = "cpu"
@@ -58,7 +60,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"  # 쉼표로 구분
     SERVE_FRONTEND: bool = False
     FRONTEND_DIST: Path = ROOT_DIR / "frontend" / "dist"
-    SIGNUP_INVITE_CODE: str = ""
+    NEW_USER_PHOTO_POLICY: Literal["persistent", "session"] = "persistent"
 
     def validate_auth(self) -> None:
         if len(self.JWT_SECRET.encode("utf-8")) < 32 or self.JWT_SECRET.startswith("change-me"):

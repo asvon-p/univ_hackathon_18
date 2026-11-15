@@ -1,7 +1,8 @@
 """Persistent mentor demo, without dotenv: python -m scripts.mentor_demo [--stop|--status].
 
-Only the frontend is exposed through a temporary Cloudflare HTTPS tunnel.
-Stopping never drops the dedicated PostgreSQL schema or deletes uploaded images.
+Only the frontend is exposed, through Cloudflare or an existing HTTPS endpoint.
+By default local and public demo servers share their persistent DB and images.
+Stopping never drops a PostgreSQL schema or deletes uploaded images.
 """
 
 import argparse
@@ -40,7 +41,6 @@ def credentials():
                     "email": "mentor-demo@example.com",
                     "password": secrets.token_urlsafe(15),
                     "jwt_secret": secrets.token_urlsafe(48),
-                    "invite_code": secrets.token_urlsafe(24),
                 },
                 stream,
                 indent=2,
@@ -63,7 +63,6 @@ def seed(client, account):
                 "email": account["email"],
                 "password": account["password"],
                 "nickname": "멘토 시연",
-                "invite_code": account["invite_code"],
             },
         )
         signup.raise_for_status()
@@ -112,11 +111,23 @@ def main():
     parser.add_argument("--stop", action="store_true")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--local-only", action="store_true", help="Validate before publishing")
+    parser.add_argument("--public-url", help="Existing external HTTPS endpoint, used with --local-only")
     parser.add_argument("--tryon", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--recommender", choices=["auto", "local", "openai"], default="auto")
     parser.add_argument("--reuse-tunnel", action="store_true", help="Keep the saved live HTTPS tunnel")
+    parser.add_argument(
+        "--shared-local",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use the persistent local DB and image store (default)",
+    )
     args = parser.parse_args()
     if args.local_only and args.reuse_tunnel:
         parser.error("--local-only and --reuse-tunnel cannot be combined")
+    if args.public_url and (
+        not args.local_only or not re.fullmatch(r"https://[a-z0-9.-]+(?::[0-9]{1,5})?", args.public_url)
+    ):
+        parser.error("--public-url must be an HTTPS origin and requires --local-only")
     STATE.mkdir(parents=True, exist_ok=True)
     runtime = STATE / "runtime.json"
     if args.stop:
@@ -140,7 +151,7 @@ def run(args, runtime):
     if not args.local_only and not cloudflared.is_file():
         raise RuntimeError("Install official cloudflared to .demo/tools/cloudflared.exe first")
     saved_tunnel = None
-    public_url = None
+    public_url = args.public_url
     if args.reuse_tunnel:
         from scripts.demo_process import ExistingTunnel
 
@@ -152,27 +163,40 @@ def run(args, runtime):
             raise RuntimeError("The saved HTTPS tunnel address is invalid")
         saved_tunnel = ExistingTunnel(previous.get("tunnel_pid", previous["pids"][-1]), cloudflared)
     account = credentials()
+    if args.shared_local:
+        from scripts.frontend_preview import persistent_jwt_secret
+        from scripts.shared_demo_data import LOCAL_DATABASE, LOCAL_SCHEMA
+
+        database, schema = LOCAL_DATABASE, LOCAL_SCHEMA
+        storage_dir = ROOT / ".demo/frontend-preview/persistent/storage"
+        jwt_secret = persistent_jwt_secret()
+    else:
+        database, schema = DATABASE, SCHEMA
+        storage_dir, jwt_secret = STATE / "storage", account["jwt_secret"]
     import httpx
     from alembic import command
     from alembic.config import Config
-    from sqlalchemy import create_engine, text
+    from sqlalchemy import text
     from sqlalchemy.engine import make_url
 
-    url = make_url(DATABASE).update_query_dict({"options": f"-csearch_path={SCHEMA}"})
+    from backend.app.db.engine import create_database_engine as create_engine
+
+    url = make_url(database).update_query_dict({"options": f"-csearch_path={schema}"})
+    from scripts.recommendation_runtime import frontend_environment, recommendation_environment
+
+    judge_env = recommendation_environment(args.recommender)
     env = {
         **os.environ,
         "FITJANG_SKIP_DOTENV": "1",
         "APP_ENV": "demo",
         "DATABASE_URL": url.render_as_string(hide_password=False),
-        "JWT_SECRET": account["jwt_secret"],
-        "SIGNUP_INVITE_CODE": account["invite_code"],
-        "STORAGE_DIR": str(STATE / "storage"),
+        "JWT_SECRET": jwt_secret,
+        "FITJANG_PUBLIC_ORIGIN": args.public_url or "",
+        "NEW_USER_PHOTO_POLICY": "persistent",
+        "STORAGE_DIR": str(storage_dir),
         "VISION_PROVIDER": "local",
-        "RECOMMENDER_PROVIDER": "local",
         "WEATHER_PROVIDER": "open_meteo",
         "WEATHER_TIMEOUT_SEC": "5",
-        "OPENAI_API_KEY": "",
-        "LLM_API_KEY": "",
         "WEATHER_API_KEY": "",
         "SERVE_FRONTEND": "false",
         "STORAGE_DELETE_RETRY_SECONDS": "30",
@@ -183,14 +207,16 @@ def run(args, runtime):
         "TRYON_API_KEY": "",
         "LOG_LEVEL": "WARNING",
         "PYTHONIOENCODING": "utf-8",
+        **judge_env,
     }
+    print("Recommendation provider: " + judge_env["RECOMMENDER_PROVIDER"], flush=True)
     # Configure the migration process as well as child servers before imports.
-    os.environ.update(env)
-    engine = create_engine(DATABASE, connect_args={"connect_timeout": 3})
+    os.environ.update(frontend_environment(env))
+    engine = create_engine(database, connect_args={"connect_timeout": 3})
     try:
         with engine.begin() as connection:
-            connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{SCHEMA}"'))
-            connection.execute(text(f'SET LOCAL search_path TO "{SCHEMA}"'))
+            connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+            connection.execute(text(f'SET LOCAL search_path TO "{schema}"'))
             config = Config(str(ROOT / "backend/alembic.ini"))
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
@@ -207,7 +233,7 @@ def run(args, runtime):
         process = subprocess.Popen(
             arguments,
             cwd=ROOT,
-            env=process_env if process_env is not None else env,
+            env=process_env if process_env is not None else frontend_environment(env),
             stdout=log,
             stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
@@ -217,45 +243,31 @@ def run(args, runtime):
 
     try:
         if args.tryon:
-            from scripts.local_tryon import PORT, runtime_environment
+            from scripts.local_tryon import runtime_environment
+            from scripts.tryon_control import ensure_running
 
-            gpu_python, gpu_env = runtime_environment()
-            env.update({key: gpu_env[key] for key in ("TRYON_API_URL", "TRYON_API_KEY")})
-            with httpx.Client(base_url=f"http://127.0.0.1:{PORT}", trust_env=False, timeout=3) as gpu_client:
-                try:
-                    response = gpu_client.get("/health")
-                    response.raise_for_status()
-                except httpx.ConnectError:
-                    # An existing local preview worker can be shared. Never stop a shared GPU worker.
-                    with socket.socket() as probe:
-                        probe.bind(("127.0.0.1", PORT))
-                    spawn("tryon", [str(gpu_python), "-m", "scripts.local_tryon"], {**env, **gpu_env})
-                    tryon_managed = True
-                deadline = time.monotonic() + 600
-                while time.monotonic() < deadline:
-                    try:
-                        health = gpu_client.get("/health").json()
-                        if health.get("status") == "error":
-                            raise RuntimeError("GPU model is unavailable; inspect its local log")
-                        if health.get("status") == "ok":
-                            verified = gpu_client.get(
-                                "/jobs", headers={"x-api-key": gpu_env["TRYON_API_KEY"]}
-                            )
-                            verified.raise_for_status()
-                            print("GPU ready for mentor demo (loopback only)", flush=True)
-                            break
-                    except httpx.ConnectError:
-                        pass
-                    if any(process.poll() is not None for process in processes):
-                        raise RuntimeError("GPU worker exited")
-                    time.sleep(1)
-                else:
-                    raise RuntimeError("GPU readiness timeout")
+            _, gpu_env = runtime_environment()
+            env.update(
+                {
+                    key: gpu_env[key]
+                    for key in (
+                        "TRYON_API_URL",
+                        "TRYON_API_KEY",
+                        "TRYON_MAINTENANCE_FILE",
+                    )
+                }
+            )
+            state = ensure_running()
+            print("GPU service: " + state["phase"], flush=True)
         for name, app, port, health in (
             ("backend", "backend.app.main:app", BACKEND_PORT, "/health"),
             ("frontend", "scripts.mentor_frontend:app", FRONTEND_PORT, "/login"),
         ):
-            process = spawn(name, [sys.executable, "-m", "scripts.preview_server", app, str(port)])
+            process = spawn(
+                name,
+                [sys.executable, "-m", "scripts.preview_server", app, str(port)],
+                env if name == "backend" else frontend_environment(env),
+            )
             with httpx.Client(trust_env=False, timeout=3) as client:
                 deadline = time.monotonic() + (180 if name == "backend" else 60)
                 while time.monotonic() < deadline:
@@ -272,8 +284,11 @@ def run(args, runtime):
                     time.sleep(0.3)
                 else:
                     raise RuntimeError(f"{name} readiness timeout")
-        with httpx.Client(base_url=f"http://127.0.0.1:{BACKEND_PORT}", timeout=40, trust_env=False) as client:
-            seed(client, account)
+        if not args.shared_local:
+            with httpx.Client(
+                base_url=f"http://127.0.0.1:{BACKEND_PORT}", timeout=40, trust_env=False
+            ) as client:
+                seed(client, account)
         tunnel = saved_tunnel
         if not args.local_only and saved_tunnel is None:
             config_path = STATE / "tunnel.yml"
@@ -310,8 +325,12 @@ def run(args, runtime):
             "public_url": public_url,
             "frontend_url": f"http://127.0.0.1:{FRONTEND_PORT}",
             "backend_url": f"http://127.0.0.1:{BACKEND_PORT}",
-            "schema": SCHEMA,
-            "email": account["email"],
+            "schema": schema,
+            "shared_local": args.shared_local,
+            "recommender": judge_env["RECOMMENDER_PROVIDER"],
+            "judgment_model": judge_env["OPENAI_MODEL"],
+            "storage_dir": str(storage_dir),
+            "email": "test@example.com" if args.shared_local else account["email"],
             "credentials_file": str(STATE / "credentials.json"),
             "pids": [process.pid for process in processes],
             "manager_pid": os.getpid(),

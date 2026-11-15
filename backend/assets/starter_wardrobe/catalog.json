@@ -1,0 +1,154 @@
+{
+  "version": "starter-v1",
+  "garments": [
+    {
+      "key": "top-ivory-knit",
+      "name": "아이보리 케이블 니트",
+      "category": "top",
+      "subcategory": "sweater",
+      "color": "ivory",
+      "pattern": "solid",
+      "thermal_level": 4,
+      "style_candidates": [
+        "minimal",
+        "casual"
+      ],
+      "image": "top-ivory-knit.jpg",
+      "thumbnail": "top-ivory-knit.webp",
+      "sha256": "579f7fa140e60711fe128f690f1f361bbee27a25c88bc8d4368f802d2ea31ccc",
+      "thumbnail_sha256": "01680fe7dd05c40e317c3b1a6be9a839d0bf506813867d0dbcd8bc80150a4736"
+    },
+    {
+      "key": "top-white-oxford",
+      "name": "화이트 옥스퍼드 셔츠",
+      "category": "top",
+      "subcategory": "shirt",
+      "color": "white",
+      "pattern": "solid",
+      "thermal_level": 2,
+      "style_candidates": [
+        "minimal",
+        "formal"
+      ],
+      "image": "top-white-oxford.jpg",
+      "thumbnail": "top-white-oxford.webp",
+      "sha256": "16d053215ffc881156d6881cb7ff8560fff687be8654ca26e50e4914c2b38483",
+      "thumbnail_sha256": "75947458cfdd7c9240c804d763656f0963b7ba4bb266ad46d99416bf51365d47"
+    },
+    {
+      "key": "top-navy-hoodie",
+      "name": "네이비 풀오버 후디",
+      "category": "top",
+      "subcategory": "hoodie",
+      "color": "navy",
+      "pattern": "solid",
+      "thermal_level": 3,
+      "style_candidates": [
+        "casual"
+      ],
+      "image": "top-navy-hoodie.jpg",
+      "thumbnail": "top-navy-hoodie.webp",
+      "sha256": "4b65d111a47d6f358f2558f8ff0eb81649c85efa831d7785d8e16accfb7672f9",
+      "thumbnail_sha256": "e1ffa25839fb2e16e5cfacbe5b6017a47424d43020e47b2f6f5c727d5d4f28f5"
+    },
+    {
+      "key": "bottom-blue-jeans",
+      "name": "미디엄 블루 스트레이트 데님",
+      "category": "bottom",
+      "subcategory": "jeans",
+      "color": "denim",
+      "pattern": "solid",
+      "thermal_level": 3,
+      "style_candidates": [
+        "casual"
+      ],
+      "image": "bottom-blue-jeans.jpg",
+      "thumbnail": "bottom-blue-jeans.webp",
+      "sha256": "f02a867b02c8ec78af6d213cd31c9d189014e326ee353025b6635e8315cf4e2b",
+      "thumbnail_sha256": "50f62bdcc0659a95c9a03cf9563ecb1dc1a2606cfa3210a6ab2ac1c2a0fc81cc"
+    },
+    {
+      "key": "bottom-charcoal-slacks",
+      "name": "차콜 스트레이트 슬랙스",
+      "category": "bottom",
+      "subcategory": "slacks",
+      "color": "gray",
+      "pattern": "solid",
+      "thermal_level": 2,
+      "style_candidates": [
+        "minimal",
+        "formal"
+      ],
+      "image": "bottom-charcoal-slacks.jpg",
+      "thumbnail": "bottom-charcoal-slacks.webp",
+      "sha256": "14da344acb8175fc8a2990e6bddb70d02aacc1ba620f022aa4ff67353e1e30a0",
+      "thumbnail_sha256": "873f6566b1979e18f0fa0aa31ad83b0a7b2e30375eeae73d63a36420f05fa45b"
+    },
+    {
+      "key": "bottom-beige-chinos",
+      "name": "베이지 코튼 치노 팬츠",
+      "category": "bottom",
+      "subcategory": "cotton_pants",
+      "color": "beige",
+      "pattern": "solid",
+      "thermal_level": 2,
+      "style_candidates": [
+        "casual",
+        "minimal"
+      ],
+      "image": "bottom-beige-chinos.jpg",
+      "thumbnail": "bottom-beige-chinos.webp",
+      "sha256": "1d7c170ce9690bb86ad903a0d6635188a17dc2727895ea128da7f18191a69c35",
+      "thumbnail_sha256": "b8183955341c9ccce0e73d91e628303ed1bf50fb9bf813297abde759f0de6204"
+    },
+    {
+      "key": "outerwear-olive-bomber",
+      "name": "올리브 봄버 재킷",
+      "category": "outerwear",
+      "subcategory": "jacket",
+      "color": "olive",
+      "pattern": "solid",
+      "thermal_level": 3,
+      "style_candidates": [
+        "casual"
+      ],
+      "image": "outerwear-olive-bomber.jpg",
+      "thumbnail": "outerwear-olive-bomber.webp",
+      "sha256": "f7d9eb8d2d5047e56adc611f4638889a158e90a342d555cb18d04fc8246aa601",
+      "thumbnail_sha256": "70db8c271b92c8d17bf59218025bba08b54d3e4fc962015922947d01548d77f5"
+    },
+    {
+      "key": "outerwear-beige-trench",
+      "name": "베이지 싱글 트렌치코트",
+      "category": "outerwear",
+      "subcategory": "coat",
+      "color": "beige",
+      "pattern": "solid",
+      "thermal_level": 4,
+      "style_candidates": [
+        "minimal",
+        "formal"
+      ],
+      "image": "outerwear-beige-trench.jpg",
+      "thumbnail": "outerwear-beige-trench.webp",
+      "sha256": "46b9c0b4742eb31999e98bae98dd3e028f1cf79b353bc4dbe8790f3c30691503",
+      "thumbnail_sha256": "a1d640696c94af5adc9a7ebe95aba1a8e2ba0a41c439179c057a7bbd59c26224"
+    },
+    {
+      "key": "outerwear-indigo-denim",
+      "name": "인디고 데님 트러커 재킷",
+      "category": "outerwear",
+      "subcategory": "jacket",
+      "color": "denim",
+      "pattern": "solid",
+      "thermal_level": 3,
+      "style_candidates": [
+        "casual"
+      ],
+      "image": "outerwear-indigo-denim.jpg",
+      "thumbnail": "outerwear-indigo-denim.webp",
+      "sha256": "1660c5b56361439b4be50827b17f8007dd2874aefc97e19c4aa5a15b06e88deb",
+      "thumbnail_sha256": "d6c5a287df38042cf63a30b0d72e43d9d2fac207452098a61dc3a49426d8a0db"
+    }
+  ]
+}

@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from backend.app.schemas.garment import GarmentView
 from backend.app.schemas.weather import Temperature, WeatherResponse
 from shared.contracts import Occasion, Outfit, StylePreference, UserContext
+from shared.day_plans import OuterwearPolicy
 
 
 class RecommendationRequest(BaseModel):
@@ -22,11 +23,28 @@ class RecommendationRequest(BaseModel):
     occasion: Occasion | None = None
     preferred_styles: list[StylePreference] = Field(default_factory=list, max_length=20)
     excluded_items: list[UUID] = Field(default_factory=list)
+    required_garment_ids: list[UUID] = Field(default_factory=list, max_length=3)
+    schedule_id: UUID | None = None
+    schedule_version: int | None = Field(default=None, ge=1, strict=True)
+    # Shared UserContext may serialize its empty internal snapshot. Never accept supplied content.
+    day_plan: None = None
+    reference_id: UUID | None = None
+    reference_version: int | None = Field(default=None, ge=1, strict=True)
+    style_reference: None = None
+    outerwear_policy: OuterwearPolicy = "always_worn"
     user_id: Literal["me"] | None = None
     recent_feedback: list = Field(default_factory=list, max_length=0)
 
     @model_validator(mode="after")
     def require_temperature_or_location(self):
+        if (self.reference_id is None) != (self.reference_version is None):
+            raise ValueError("참고 사진 ID와 버전을 함께 입력하세요")
+        if (self.schedule_id is None) != (self.schedule_version is None):
+            raise ValueError("일정 ID와 버전을 함께 입력하세요")
+        if len(self.required_garment_ids) != len(set(self.required_garment_ids)):
+            raise ValueError("필수 의류를 중복 선택할 수 없습니다")
+        if set(self.required_garment_ids) & set(self.excluded_items):
+            raise ValueError("같은 옷을 필수 의류와 제외 의류로 선택할 수 없습니다")
         if (self.lat is None) != (self.lon is None):
             raise ValueError("lat와 lon을 함께 입력하세요")
         if self.lat is None and self.temperature_c is None:

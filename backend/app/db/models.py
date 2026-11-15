@@ -1,16 +1,18 @@
 """사용자·옷장·추천·피드백. 스키마 변경은 Alembic으로 적용합니다."""
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     DDL,
     JSON,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     SmallInteger,
     String,
@@ -33,6 +35,16 @@ class User(UUIDPkMixin, TimestampMixin, Base):
     nickname: Mapped[str] = mapped_column(String(50))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    photo_policy: Mapped[str] = mapped_column(String(20), default="persistent", server_default="persistent")
+    auth_token_version: Mapped[int] = mapped_column(SmallInteger, default=0, server_default="0")
+
+
+class MediaSession(Base):
+    __tablename__ = "media_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class UserProfile(Base):
@@ -76,15 +88,73 @@ class UserProfile(Base):
     )
 
 
+class TryOnResult(UUIDPkMixin, Base):
+    __tablename__ = "tryon_results"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    photo_id: Mapped[uuid.UUID] = mapped_column()
+    photo_version: Mapped[str] = mapped_column(String(64))
+    render_version: Mapped[str] = mapped_column(String(32), default="legacy", server_default="legacy")
+    layering_status: Mapped[str] = mapped_column(
+        String(20), default="not_requested", server_default="not_requested"
+    )
+    items: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"))
+    names: Mapped[list] = mapped_column(JSON().with_variant(JSONB(), "postgresql"))
+    image_id: Mapped[uuid.UUID | None] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TryOnDeletionJob(Base):
+    __tablename__ = "tryon_deletion_jobs"
+
+    image_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID]
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(String(100))
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TryOnQueueState(Base):
+    __tablename__ = "tryon_queue_state"
+    __table_args__ = (CheckConstraint("id = 1 AND capacity BETWEEN 1 AND 8", name="tryon_capacity"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    capacity: Mapped[int] = mapped_column(Integer, default=8, server_default="8")
+
+
+class TryOnAdmission(Base):
+    """Short-lived scheduling metadata; no customer photos, clothing inputs or results."""
+
+    __tablename__ = "tryon_admissions"
+    job_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True)
+    session_key: Mapped[str | None] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Garment(UUIDPkMixin, TimestampMixin, Base):
     __tablename__ = "garments"
+    is_example: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    opening_polygon: Mapped[list] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), default=list, server_default="[]"
+    )
+    opening_mode: Mapped[str] = mapped_column(String(12), default="auto", server_default="auto")
     __table_args__ = (
+        Index("ix_garments_user_created_id", "user_id", "created_at", "id"),
         CheckConstraint("status IN ('available', 'laundry', 'inactive')", name="status_values"),
         CheckConstraint("analysis_status IN ('pending', 'done', 'failed')", name="analysis_status_values"),
+        CheckConstraint("wears_before_laundry BETWEEN 1 AND 2", name="wears_before_laundry_range"),
+        CheckConstraint("wear_count BETWEEN 0 AND 2", name="wear_count_range"),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     status: Mapped[str] = mapped_column(String(20), default="available", server_default="available")
+    wears_before_laundry: Mapped[int] = mapped_column(SmallInteger, default=1, server_default="1")
+    wear_count: Mapped[int] = mapped_column(SmallInteger, default=0, server_default="0")
     analysis_status: Mapped[str] = mapped_column(String(20), default="pending", server_default="pending")
     original_path: Mapped[str] = mapped_column(String(500))
     name: Mapped[str | None] = mapped_column(String(100))
@@ -137,6 +207,58 @@ class RecommendationRateLimit(Base):
     )
 
 
+class StyleReference(UUIDPkMixin, TimestampMixin, Base):
+    __tablename__ = "style_references"
+    __table_args__ = (
+        CheckConstraint("version >= 1", name="version_positive"),
+        CheckConstraint("status IN ('draft','ready')", name="status_values"),
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    status: Mapped[str] = mapped_column(String(10), default="draft", server_default="draft")
+    image_path: Mapped[str | None] = mapped_column(String(500))
+    image_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    features: Mapped[list] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), default=list, server_default="[]"
+    )
+    regions: Mapped[list] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), default=list, server_default="[]"
+    )
+    notes: Mapped[list] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), default=list, server_default="[]"
+    )
+    focus: Mapped[str] = mapped_column(String(20), default="balanced", server_default="balanced")
+
+
+class ReferenceAnalysisUsage(Base):
+    __tablename__ = "reference_analysis_usage"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    requests: Mapped[list] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), default=list)
+
+
+class ReferenceDeletionJob(Base):
+    __tablename__ = "reference_deletion_jobs"
+    __table_args__ = (CheckConstraint("attempts >= 0", name="attempts_nonnegative"),)
+    reference_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID]
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(String(100))
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DayPlan(UUIDPkMixin, TimestampMixin, Base):
+    __tablename__ = "day_plans"
+    __table_args__ = (CheckConstraint("version >= 1", name="version_positive"),)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    day: Mapped[date] = mapped_column(Date)
+    timezone: Mapped[str] = mapped_column(String(80))
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    events: Mapped[list] = mapped_column(JSON().with_variant(JSONB(), "postgresql"))
+
+
 class Recommendation(UUIDPkMixin, Base):
     __tablename__ = "recommendations"
     __table_args__ = (CheckConstraint("latency_ms >= 0", name="latency_nonnegative"),)
@@ -154,6 +276,26 @@ class Recommendation(UUIDPkMixin, Base):
         order_by="RecommendationOutfit.rank",
         lazy="selectin",
     )
+
+
+class RecommendationGeneration(UUIDPkMixin, TimestampMixin, Base):
+    __tablename__ = "recommendation_requests"
+    __table_args__ = (
+        UniqueConstraint("user_id", "key_hash", name="uq_recommendation_requests_user_key"),
+        CheckConstraint("status IN ('pending','completed','failed')", name="status_values"),
+        Index("ix_recommendation_requests_auto", "user_id", "fingerprint", "created_at"),
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    key_hash: Mapped[str] = mapped_column(String(64))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    automatic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    status: Mapped[str] = mapped_column(String(12), default="pending", server_default="pending")
+    recommendation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("recommendations.id", ondelete="SET NULL")
+    )
+    error_status: Mapped[int | None] = mapped_column(Integer)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    error_detail: Mapped[str | None] = mapped_column(String(500))
 
 
 class RecommendationOutfit(UUIDPkMixin, Base):
@@ -179,6 +321,9 @@ class RecommendationOutfit(UUIDPkMixin, Base):
     style_tags: Mapped[list[str]] = mapped_column(JSON().with_variant(ARRAY(String()), "postgresql"))
     reason: Mapped[str] = mapped_column(Text)
     score: Mapped[float | None] = mapped_column(Float)
+    details: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), default=dict, server_default="{}"
+    )
     recommendation: Mapped[Recommendation] = relationship(back_populates="outfits")
 
 
@@ -261,3 +406,16 @@ event.listen(
         END
     """).execute_if(dialect="sqlite"),
 )
+
+
+class ApiUsage(UUIDPkMixin, Base):
+    __tablename__ = "api_usage"
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    model: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(30), default="pending")
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    cached_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    estimated_usd: Mapped[float | None] = mapped_column(Float)
+    price_basis: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -3,11 +3,12 @@
 from collections.abc import Iterator
 from functools import lru_cache
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.core.config import get_settings
+from backend.app.db.engine import create_database_engine as create_engine
 
 
 @lru_cache

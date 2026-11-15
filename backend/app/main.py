@@ -15,14 +15,19 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.app.adapters import registry
 from backend.app.api.v1 import (
+    admin,
+    garment_layers,
     auth,
     body_photo,
+    day_plans,
     garments,
     health,
     images,
     media,
     profile,
     recommendations,
+    style_references,
+    tryon_results,
     weather,
 )
 from backend.app.core.config import get_settings
@@ -30,6 +35,7 @@ from backend.app.core.errors import register_exception_handlers
 from backend.app.core.logging import setup_logging
 from backend.app.storage.worker import retry_deletions
 from shared.contracts import CONTRACT_VERSION
+from shared.memory_uploads import MemoryUploadMiddleware
 
 log = logging.getLogger("fitjang")
 
@@ -67,7 +73,15 @@ def create_app() -> FastAPI:
     s = get_settings()
     s.validate_auth()
     setup_logging(s.LOG_LEVEL)
-    app = FastAPI(title="Fitjang API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="Fitjang API",
+        version="0.1.0",
+        lifespan=lifespan,
+        openapi_url=None if s.APP_ENV == "demo" else "/openapi.json",
+        docs_url=None if s.APP_ENV == "demo" else "/docs",
+        redoc_url=None if s.APP_ENV == "demo" else "/redoc",
+    )
+    app.add_middleware(MemoryUploadMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=s.cors_origins,
@@ -79,6 +93,8 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     app.include_router(health.router)
+    app.include_router(admin.router)
+    app.include_router(garment_layers.router)
     app.include_router(auth.router)
     app.include_router(profile.router)
     app.include_router(profile.frontend_router)
@@ -87,7 +103,10 @@ def create_app() -> FastAPI:
     app.include_router(garments.router)
     app.include_router(media.router)
     app.include_router(recommendations.router)
+    app.include_router(day_plans.router)
+    app.include_router(style_references.router)
     app.include_router(weather.router)
+    app.include_router(tryon_results.router)
 
     # 시연 시: 프론트 빌드 결과를 같은 주소(/)에서 제공 → 터널 1개, CORS 불필요
     # 반드시 API 라우터 등록 뒤에 마운트해야 /api 경로가 가려지지 않습니다.

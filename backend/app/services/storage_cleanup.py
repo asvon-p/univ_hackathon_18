@@ -11,7 +11,11 @@ from backend.app.db.models import (
     AccountStorageDeletionJob,
     BodyPhotoDeletionJob,
     Garment,
+    ReferenceDeletionJob,
     StorageDeletionJob,
+    StyleReference,
+    TryOnDeletionJob,
+    TryOnResult,
     User,
     UserProfile,
 )
@@ -88,6 +92,51 @@ class StorageCleanupService:
         return {"selected": len(ids), "completed": completed, "deferred": len(ids) - completed}
 
 
+class ReferenceCleanupService(StorageCleanupService):
+    job_model = ReferenceDeletionJob
+    id_field = "reference_id"
+
+    def _is_live(self, job):
+        return (
+            self.db.scalar(
+                select(StyleReference.id).where(
+                    StyleReference.id == job.reference_id, StyleReference.image_path.is_not(None)
+                )
+            )
+            is not None
+        )
+
+    def _prefix(self, job):
+        return f"{job.user_id}/style-references/{job.reference_id}"
+
+    def expire(self, limit=100):
+        """A committed expiry revokes access first; file failure remains retryable after restart."""
+        rows = self.db.scalars(
+            select(StyleReference)
+            .where(
+                StyleReference.image_path.is_not(None),
+                StyleReference.image_expires_at <= datetime.now(UTC),
+            )
+            .order_by(StyleReference.image_expires_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ).all()
+        for row in rows:
+            detach_reference_image(self.db, row)
+        self.db.commit()
+        return len(rows)
+
+
+def detach_reference_image(db, row):
+    """Call while holding the reference row/user lock; commit before touching files."""
+    if row.image_path is not None:
+        if db.get(ReferenceDeletionJob, row.id) is None:
+            db.add(ReferenceDeletionJob(reference_id=row.id, user_id=row.user_id))
+        row.image_path = None
+    row.image_expires_at = None
+    row.regions = []
+
+
 class AccountStorageCleanupService(StorageCleanupService):
     job_model = AccountStorageDeletionJob
     id_field = "user_id"
@@ -118,13 +167,41 @@ class BodyPhotoCleanupService(StorageCleanupService):
         return f"{job.user_id}/body-photos/{job.photo_id}"
 
 
+class TryOnCleanupService(StorageCleanupService):
+    job_model = TryOnDeletionJob
+    id_field = "image_id"
+
+    def _is_live(self, job):
+        return self.db.scalar(select(TryOnResult.id).where(TryOnResult.image_id == job.image_id)) is not None
+
+    def _prefix(self, job):
+        return f"{job.user_id}/tryon/{job.image_id}"
+
+
 def process_pending_deletions() -> dict[str, int]:
     from backend.app.db.session import get_sessionmaker
     from backend.app.storage.local import get_storage
 
     with get_sessionmaker()() as db:
+        from backend.app.services.media_session import expire_sessions
+
+        expire_sessions(db)
+        from backend.app.services.tryon_admission import cleanup as expire_admissions
+
+        expire_admissions(db)
+        db.commit()
         storage = get_storage()
         accounts = AccountStorageCleanupService(db, storage).drain()
         garments = StorageCleanupService(db, storage).drain()
         photos = BodyPhotoCleanupService(db, storage).drain()
-        return {key: accounts[key] + garments[key] + photos[key] for key in accounts}
+        results = TryOnCleanupService(db, storage).drain()
+        reference_cleanup = ReferenceCleanupService(db, storage)
+        reference_cleanup.expire()
+        references = reference_cleanup.drain()
+        from backend.app.services.reference_temporary import expire_scratch
+
+        expire_scratch()
+        return {
+            key: accounts[key] + garments[key] + photos[key] + results[key] + references[key]
+            for key in accounts
+        }

@@ -9,14 +9,15 @@ import pytest
 from PIL import Image
 from sqlalchemy import create_engine, text
 
+from backend.tests.e2e.recommendation_flow import submit_recommendation
 from scripts.demo_assets import CATALOG, garment_images
 
 
 @pytest.mark.parametrize(
     "live_api",
     [
-        {"provider": "local", "invite_code": "ui-invite", "weather_stub": True},
-        {"provider": "local", "invite_code": "ui-invite", "weather_stub": False},
+        {"provider": "local", "weather_stub": True},
+        {"provider": "local", "weather_stub": False},
     ],
     indirect=True,
 )
@@ -24,13 +25,9 @@ def test_integrated_frontend_forms_weather_wardrobe_recommendation_feedback(live
     ui, backend, runtime = live_frontend
     automatic = request.node.callspec.params["live_api"]["weather_stub"]
     assert ui.get("/wardrobe").status_code == 303
+    assert 'name="invite_code"' not in ui.get("/signup").text
     email, password = f"pages-{uuid4().hex}@example.com", "FrontendPages123!"
     signup = ui.post("/signup", data={"email": email, "password": password, "password_confirm": password})
-    assert signup.status_code == 403
-    signup = ui.post(
-        "/signup",
-        data={"email": email, "password": password, "password_confirm": password, "invite_code": "ui-invite"},
-    )
     assert signup.status_code == 303 and "fitjang_token" in ui.cookies
     profile = ui.get(signup.headers["location"])
     assert profile.status_code == 200 and 'name="consent_body_info"' in profile.text
@@ -76,11 +73,20 @@ def test_integrated_frontend_forms_weather_wardrobe_recommendation_feedback(live
         )
         assert confirmed.status_code == 303, confirmed.text
         assert ui.get(f"/garment-images/{garment_id}").headers["content-type"].startswith("image/")
-    assert ui.get("/wardrobe?q=navy").status_code == 200
+    wardrobe = ui.get("/wardrobe?q=navy")
+    assert wardrobe.status_code == 200 and "?size=thumbnail" in wardrobe.text
+    for gid in ids:
+        small = ui.get(f"/garment-images/{gid}?size=thumbnail")
+        assert small.status_code == 200 and small.headers["content-type"] == "image/webp"
+        assert small.headers["cache-control"] == "private, no-store"
+        with Image.open(BytesIO(small.content)) as im:
+            assert max(im.size) <= 384
+        detail = ui.get(f"/garments/{gid}")
+        assert f'src="/garment-images/{gid}"' in detail.text
     form = ui.get("/recommend")
     assert form.status_code == 200 and 'id="weather-status"' in form.text
     temp = 6.5 if automatic else 0
-    result = ui.get("/recommend/result", params={"temp": temp, "style_text": "꾸안꾸"})
+    result = submit_recommendation(ui, {"temp": temp, "style_text": "꾸안꾸"})
     assert result.status_code == 200 and "코디 1" in result.text, result.text
     rid = re.search(r'name="recommendation_id" value="([^"]+)"', result.text).group(1)
     oid = re.search(r'name="outfit_id" value="([^"]+)"', result.text).group(1)
@@ -103,9 +109,19 @@ def test_integrated_frontend_forms_weather_wardrobe_recommendation_feedback(live
     engine.dispose()
     with httpx.Client(base_url=ui.base_url, trust_env=False) as stranger:
         assert stranger.get(f"/garment-images/{ids[0]}").status_code in (303, 401)
+        assert stranger.get(f"/garment-images/{ids[0]}?size=thumbnail").status_code == 401
         assert stranger.get("/weather?lat=37&lon=127").status_code == 401
     assert ui.post("/logout").status_code == 303
     assert ui.get("/wardrobe").status_code == 303
     login = ui.post("/login", data={"email": email, "password": password})
     assert login.status_code == 303
     assert "top test" in ui.get("/wardrobe").text
+    detail_path = f"/garments/{ids[0]}"
+    assert "착용 기록" in ui.get(detail_path).text
+    assert ui.post(detail_path + "/laundry-interval", data={"wears_before_laundry": 2}).status_code == 303
+    assert ui.post(detail_path + "/wear").status_code == 303
+    assert "세탁 후 착용 1회" in ui.get(detail_path).text
+    assert ui.post(detail_path + "/wear").status_code == 303
+    assert "세탁 완료" in ui.get(detail_path).text
+    assert ui.post(detail_path + "/status", data={"status": "available"}).status_code == 303
+    assert "세탁 후 착용 0회" in ui.get(detail_path).text

@@ -8,36 +8,35 @@
 from __future__ import annotations
 
 import re
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from .common import (
-    CATEGORY_ORDER,
     LABELS,
     TOKEN_COOKIE,
     current_user,
     go_login,
     http_status,
-    ko,
     logged_in,
     logged_out,
     register_templates,
     render,
     safe_next,
 )
-from .connect import BODY_PHOTO_ENABLED, ApiError
+from .connect import BODY_PHOTO_ENABLED, USE_MOCK, ApiError
 from .connect import auth_profile as auth
 from .connect import garment_storage as closet
+from .connect import request as api_request
 from .connect.images import normalize_photo
 
 router = APIRouter()
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 GENDERS = [("", "선택 안 함"), ("female", "여성"), ("male", "남성"), ("other", "기타")]
-# 종류별 세부 종류 선택지 (contracts.py에 SUBCATEGORIES가 생기면 그걸로 교체)
+# 형태 선택지는 착용 역할과 독립적입니다. 예: 셔츠를 아우터로 착용.
 SUBCATEGORIES = {
     "top": [
         "t_shirt",
@@ -53,6 +52,7 @@ SUBCATEGORIES = {
     "outerwear": ["coat", "jacket", "padding", "jumper", "blazer"],
     "shoes": ["sneakers", "loafers", "boots", "sandals", "heels", "dress_shoes"],
 }
+GARMENT_TYPES = tuple(dict.fromkeys(sub for values in SUBCATEGORIES.values() for sub in values))
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # JPG/PNG/HEIC/HEIF, 최대 10MB
 MAX_STYLES = 3
 
@@ -118,8 +118,30 @@ async def login_submit(
 
 
 @router.post("/logout")
-async def logout():
+async def logout(request: Request):
+    token = request.cookies.get(TOKEN_COOKIE)
+    if token and not USE_MOCK:
+        try:
+            await api_request("POST", "/auth/logout", token=token)
+        except ApiError as e:
+            if e.status != 401:
+                return JSONResponse(
+                    {"error": "로그아웃 정리를 완료하지 못했습니다. 다시 시도해 주세요."}, status_code=503
+                )
     return logged_out()
+
+
+@router.post("/session/activity")
+async def session_activity(request: Request):
+    token = request.cookies.get(TOKEN_COOKIE)
+    if not token:
+        return Response(status_code=401)
+    if not USE_MOCK:
+        try:
+            await api_request("POST", "/auth/activity", token=token)
+        except ApiError as e:
+            return Response(status_code=e.status or 503)
+    return Response(status_code=204)
 
 
 # ---- 회원가입 ---------------------------------------------------------------
@@ -136,7 +158,6 @@ async def signup_submit(
     email: str = Form(""),
     password: str = Form(""),
     password_confirm: str = Form(""),
-    invite_code: str = Form(""),
 ):
     email = email.strip()
     errors: dict[str, str] = {}
@@ -154,7 +175,7 @@ async def signup_submit(
         return render(request, "signup.html", status=422, email=email, errors=errors)
 
     try:
-        token = await auth.signup(email, password, invite_code.strip())
+        token = await auth.signup(email, password)
     except ApiError as e:
         if e.code == "EMAIL_ALREADY_EXISTS":
             return render(
@@ -204,6 +225,8 @@ async def profile_page(request: Request, welcome: int = 0, done: str = ""):
         welcome=bool(welcome),
         form=ProfileForm.from_profile(profile),
         body_photo=profile.body_photo_updated_at,
+        has_tryon_photos=bool(profile.saved_tryons),
+        photo_cleanup_pending=done == "body_cleanup_pending",
         notice=DONE_MESSAGES.get(done),
     )
 
@@ -331,13 +354,18 @@ async def body_photo_page(request: Request, welcome: int = 0):
     token = request.cookies.get(TOKEN_COOKIE)
     if not token:
         return go_login(request)
+    try:
+        photo_profile = await auth.get_profile(token)
+    except ApiError:
+        return logged_out()
     return render(
         request,
         "body_photo.html",
         active="profile",
         bare=bool(welcome),
         welcome=bool(welcome),
-        has_photo=bool(await body_photo_version(token)),
+        has_photo=bool(photo_profile.body_photo_updated_at),
+        photo_policy=photo_profile.photo_policy,
     )
 
 
@@ -390,10 +418,12 @@ async def body_photo_delete(request: Request):
     if not token:
         return go_login(request)
     try:
-        await auth.delete_body_photo(token)
+        await auth.delete_body_photo(token, include_tryons=True)
     except ApiError as e:
         if e.status == 401:
             return logged_out()
+        if e.code == "PHOTO_CLEANUP_PENDING":
+            return RedirectResponse("/profile?done=body_cleanup_pending", status_code=303)
         if e.status != 404:  # 이미 없으면 지운 것과 같음
             return render(
                 request,
@@ -435,15 +465,30 @@ async def wardrobe(
     status: str = "",
     q: str = "",
     done: str = "",
+    cursor: str = "",
+    partial: bool = False,
 ):
+    from fastapi.responses import JSONResponse
+
+    from frontend.common import env
+
     token = request.cookies.get(TOKEN_COOKIE)
     if not token:
-        return go_login(request)
+        return (
+            JSONResponse({"error": "로그인이 필요해요."}, status_code=401) if partial else go_login(request)
+        )
     category = category if category in LABELS["category"] else ""
     status = status if status in LABELS["status"] else ""
+    q = " ".join(q.split())[:50]
     try:
-        garments = await closet.list_garments(token)
+        page = await closet.page_garments(token, category=category, status=status, q=q, cursor=cursor)
     except ApiError as e:
+        if partial:
+            return JSONResponse(
+                {"error": e.message},
+                status_code=http_status(e),
+                headers={"Cache-Control": "private, no-store"},
+            )
         if e.status == 401:
             return logged_out()
         return render(
@@ -456,85 +501,44 @@ async def wardrobe(
             counts={},
             category=category,
             status_filter=status,
+            q=q,
             server_error=e.message,
         )
-
-    q = " ".join(q.split())[:50]
-    if q:
-        garments_for_view = [g for g in garments if search_match(g, q)]
-    else:
-        garments_for_view = garments
-    in_status = [g for g in garments_for_view if not status or g.status == status]
-    counts = {c: sum(1 for g in in_status if g.category == c) for c in CATEGORY_ORDER}
-    shown = [g for g in in_status if not category or g.category == category]
-    return render(
+    next_url = wardrobe_url(category, status, q)
+    next_url += (
+        ("&" if "?" in next_url else "?") + urlencode({"cursor": page["next_cursor"]})
+        if page["next_cursor"]
+        else ""
+    )
+    if not page["next_cursor"]:
+        next_url = None
+    if partial:
+        html = env.get_template("wardrobe_cards.html").render(garments=page["items"])
+        return JSONResponse(
+            {"html": html, "next_url": next_url}, headers={"Cache-Control": "private, no-store"}
+        )
+    response = render(
         request,
         "wardrobe.html",
         active="wardrobe",
-        garments=shown,
-        total=len(garments),
-        counts=counts,
-        all_count=len(in_status),
+        garments=page["items"],
+        total=page["total"],
+        counts=page["counts"],
+        all_count=page["all_count"],
+        matched_count=page["matched_count"],
+        next_url=next_url,
         category=category,
         status_filter=status,
         q=q,
         notice=DONE_MESSAGES.get(done),
     )
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 def wardrobe_url(category: str = "", status: str = "", q: str = "") -> str:
     params = {k: v for k, v in (("category", category), ("status", status), ("q", q)) if v}
     return "/wardrobe" + (f"?{urlencode(params)}" if params else "")
-
-
-# 검색할 때 쓰는 일상 색 이름 (화면 표시는 LABELS의 "블랙" 등)
-COLOR_WORDS = {
-    "black": "검정 검은 검은색",
-    "white": "흰 흰색 하양 하얀",
-    "gray": "회색 그레이",
-    "ivory": "아이보리 크림",
-    "beige": "베이지",
-    "brown": "갈색 브라운",
-    "camel": "카멜 낙타색",
-    "khaki": "카키",
-    "navy": "남색 네이비 곤색",
-    "blue": "파랑 파란 파란색 청색",
-    "sky_blue": "하늘 하늘색",
-    "denim": "데님 청",
-    "green": "초록 초록색 녹색",
-    "olive": "올리브",
-    "red": "빨강 빨간 빨간색",
-    "burgundy": "버건디 와인",
-    "pink": "분홍 분홍색",
-    "purple": "보라 보라색",
-    "yellow": "노랑 노란 노란색",
-    "orange": "주황 주황색",
-    "multi": "여러색 알록달록",
-}
-
-
-def search_match(g, query: str) -> bool:
-    """검색: 이름·위치·세부 종류(니트)·종류·색·패턴·스타일·상태를 한글·영어로.
-    여러 단어면 모두 들어 있어야 함 (예: "네이비 니트")."""
-    words = [
-        getattr(g, "name", None) or "",
-        getattr(g, "location", None) or "",
-        g.category or "",
-        ko(g.category, "category"),
-        g.subcategory or "",
-        ko(g.subcategory, "subcategory") if g.subcategory else "",
-        g.color or "",
-        ko(g.color, "color") if g.color else "",
-        COLOR_WORDS.get(g.color or "", ""),
-        g.pattern,
-        ko(g.pattern, "pattern"),
-        ko(g.status, "status"),
-        *g.style_candidates,
-        *(ko(st, "style") for st in g.style_candidates),
-    ]
-    haystack = " ".join(words).lower().replace("_", " ").replace("-", " ")
-    compact = haystack.replace(" ", "")
-    return all(t in haystack or t in compact for t in query.lower().split())
 
 
 # ---- 옷 등록: 1) 사진 올리기 → 2) 자동으로 채운 정보 확인 -------------------
@@ -546,7 +550,12 @@ async def garment_new(request: Request):
 
 
 @router.post("/garments/new", response_class=HTMLResponse)
-async def garment_upload(request: Request, file: Annotated[UploadFile | None, File()] = None):
+async def garment_upload(
+    request: Request,
+    file: Annotated[UploadFile | None, File()] = None,
+    photo_mode: Annotated[Literal["square", "long"], Form()] = "square",
+    wearing_role: Annotated[Literal["", "top", "bottom", "outerwear"], Form()] = "",
+):
     token = request.cookies.get(TOKEN_COOKIE)
     if not token:
         return go_login(request)
@@ -558,17 +567,25 @@ async def garment_upload(request: Request, file: Annotated[UploadFile | None, Fi
             status=status,
             active="wardrobe",
             file_error=message,
+            photo_mode=photo_mode,
+            wearing_role=wearing_role,
         )
 
     try:
         content, content_type, size = await read_photo(file, token)
     except PhotoError as e:
         return fail(e.status, e.message)
-    if size and abs(size[0] - size[1]) > 1:
-        return fail(400, "사진을 1:1 정사각형으로 잘라서 올려 주세요.")
+    if size:
+        width, height = size
+        valid_ratio = abs(width - height) <= 1 if photo_mode == "square" else abs(width * 3 - height * 2) <= 3
+        if not valid_ratio:
+            ratio = "정사각형 1:1" if photo_mode == "square" else "세로 2:3"
+            return fail(400, f"선택한 {ratio} 틀에 맞춰 사진을 조절해 주세요.")
 
     try:
-        garment = await closet.create_garment(token, file.filename, content, content_type)
+        garment = await closet.create_garment(
+            token, file.filename, content, content_type, wearing_role=wearing_role or None
+        )
     except ApiError as e:
         if e.status == 401:
             return logged_out()
@@ -788,8 +805,11 @@ DONE_MESSAGES = {
     "saved": "프로필을 저장했어요.",
     "updated": "정보를 저장했어요.",
     "status": "상태를 바꿨어요.",
+    "wear_recorded": "착용을 기록했어요.",
+    "laundry_interval": "세탁 기준을 저장했어요.",
     "body_saved": "전신 사진을 저장했어요.",
-    "body_deleted": "전신 사진을 지웠어요.",
+    "body_deleted": "전신 사진과 착샷 기록을 지웠어요.",
+    "body_cleanup_pending": "사진 접근을 차단했어요. 일부 파일은 정리 중이에요.",
 }
 
 
@@ -825,6 +845,32 @@ async def garment_status(request: Request, garment_id: str, status: str = Form("
     return RedirectResponse(f"/garments/{garment_id}?done=status", status_code=303)
 
 
+@router.post("/garments/{garment_id}/wear")
+async def garment_wear(request: Request, garment_id: str):
+    token = request.cookies.get(TOKEN_COOKIE)
+    if not token:
+        return go_login(request)
+    try:
+        await closet.record_wear(token, garment_id)
+    except ApiError as e:
+        return logged_out() if e.status == 401 else garment_error(request, e, "착용을 기록하지 못했어요")
+    return RedirectResponse(f"/garments/{garment_id}?done=wear_recorded", status_code=303)
+
+
+@router.post("/garments/{garment_id}/laundry-interval")
+async def garment_laundry_interval(
+    request: Request, garment_id: str, wears_before_laundry: Annotated[int, Form(ge=1, le=2)]
+):
+    token = request.cookies.get(TOKEN_COOKIE)
+    if not token:
+        return go_login(request)
+    try:
+        await closet.update_garment(token, garment_id, {"wears_before_laundry": wears_before_laundry})
+    except ApiError as e:
+        return logged_out() if e.status == 401 else garment_error(request, e, "세탁 기준을 저장하지 못했어요")
+    return RedirectResponse(f"/garments/{garment_id}?done=laundry_interval", status_code=303)
+
+
 @router.post("/garments/{garment_id}/delete")
 async def garment_delete(request: Request, garment_id: str):
     token = request.cookies.get(TOKEN_COOKIE)
@@ -838,19 +884,20 @@ async def garment_delete(request: Request, garment_id: str):
 
 
 @router.get("/garment-images/{garment_id}")
-async def garment_image(request: Request, garment_id: str):
+async def garment_image(request: Request, garment_id: str, size: Literal["full", "thumbnail"] = "full"):
     """옷 사진 대신 받아 주기: 토큰을 붙여 백엔드에서 받아 옴 (connect/garment_storage.fetch_image)."""
     token = request.cookies.get(TOKEN_COOKIE)
     if not token:
         return Response(status_code=401)
     try:
-        content, content_type = await closet.fetch_image(token, garment_id)
+        kinds = ("thumbnail",) if size == "thumbnail" else ("cutout", "original")
+        content, content_type = await closet.fetch_image(token, garment_id, kinds=kinds)
     except ApiError as e:
         return Response(status_code=e.status if e.status >= 400 else 502)
     return Response(
         content,
         media_type=content_type,
-        headers={"Cache-Control": "private, max-age=300"},
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
     )
 
 
@@ -881,7 +928,7 @@ class GarmentForm:
     def from_garment(cls, g) -> GarmentForm:
         return cls(
             g.category,
-            (g.subcategory or "").replace("-", "_"),
+            g.subcategory or "",
             g.color or "unknown",
             g.pattern,
             g.style_candidates,
@@ -897,9 +944,9 @@ class GarmentForm:
         if len(self.location) > MAX_TEXT:
             errors["location"] = f"위치는 {MAX_TEXT}자까지 쓸 수 있어요."
         if self.category not in LABELS["category"]:
-            errors["category"] = "종류를 골라 주세요."
-        elif self.subcategory and self.subcategory not in SUBCATEGORIES[self.category]:
-            errors["subcategory"] = "세부 종류를 다시 골라 주세요."
+            errors["category"] = "착용 역할을 골라 주세요."
+        if len(self.subcategory) > 50:
+            errors["subcategory"] = "옷 형태는 50자까지 쓸 수 있어요."
         if self.color not in LABELS["color"]:
             errors["color"] = "색상을 다시 골라 주세요."
         if self.pattern not in LABELS["pattern"]:
@@ -1019,7 +1066,7 @@ LOGIN_HTML = """{% extends "auth_base.html" %}
 {% endif %}
 {% endblock %}
 {% block script %}
-<script>
+<script nonce="{{ request.state.csp_nonce | default('') }}">
   const demo = document.getElementById("fill-demo");
   if (demo) demo.addEventListener("click", () => {
     document.getElementById("email").value = "{{ DEMO_EMAIL }}";
@@ -1034,6 +1081,7 @@ SIGNUP_HTML = """{% extends "auth_base.html" %}
 {% block title %}회원가입{% endblock %}
 {% block form %}
 <h1>회원가입</h1>
+<p class="soft">가입하면 아우터·상의·하의 각 3벌의 예시 옷이 준비돼요. 바로 코디를 추천받고, 내 옷도 자유롭게 추가해 보세요.</p>
 <form class="stack" method="post" action="/signup" novalidate data-loading="가입 중…">
   {{ field("email", "이메일", value=email, error=errors.email, type="email", inputmode="email",
            autocomplete="email", placeholder="you@example.com",
@@ -1044,7 +1092,6 @@ SIGNUP_HTML = """{% extends "auth_base.html" %}
   {{ field("password_confirm", "비밀번호 확인", error=errors.password_confirm, password=True,
            autocomplete="new-password", placeholder="비밀번호 다시 입력",
            autofocus=errors.password_confirm and not errors.email and not errors.password) }}
-  {{ field("invite_code", "초대 코드 (선택)", placeholder="안내받은 경우에만 입력") }}
   {% if server_error %}<div class="alert" role="alert">{{ server_error }}</div>{% endif %}
   <button type="submit" class="btn btn-primary">가입하기</button>
 </form>
@@ -1103,6 +1150,10 @@ PROFILE_HTML = """{% extends "app_base.html" %}
   <p class="step">선택 · 신체 정보</p>
   <h1>프로필</h1>
   <p class="lead soft">코디 추천에 참고할 정보</p>
+  <div class="notice" style="margin-top:20px">
+    <p>신체 정보와 전신 사진 없이도 코디 추천을 체험할 수 있어요.</p>
+    <a class="btn btn-secondary" href="/wardrobe">예시 옷장으로 바로 시작하기</a>
+  </div>
   {% else %}
   <h1>프로필</h1>
   <p class="lead soft">코디 추천에 참고할 정보</p>
@@ -1117,13 +1168,13 @@ PROFILE_HTML = """{% extends "app_base.html" %}
       {% if not body_photo %}<p class="soft">착샷을 보려면 필요해요.</p>{% endif %}
       <div class="bp-btns">
         <a class="btn {{ 'btn-secondary' if body_photo else 'btn-primary' }}" href="/profile/body-photo">{{ "다시 올리기" if body_photo else "전신 사진 올리기" }}</a>
-        {% if body_photo %}
-        <details class="danger" ontoggle="if (this.open) this.querySelector('.confirm-box').scrollIntoView({ block: 'nearest', behavior: 'smooth' })">
-          <summary class="btn btn-ghost">삭제</summary>
+        {% if body_photo or has_tryon_photos or photo_cleanup_pending %}
+        <details class="danger" data-confirm-details>
+          <summary class="btn btn-ghost">사진·착샷 삭제</summary>
           <div class="confirm-box" role="alertdialog" aria-label="전신 사진 삭제 확인">
-            <p>전신 사진을 삭제할까요?</p>
+            <p>전신 사진과 저장한 착샷을 모두 삭제할까요?</p>
             <div class="two">
-              <button type="button" class="btn btn-secondary" onclick="this.closest('details').open = false">취소</button>
+              <button type="button" class="btn btn-secondary" data-close-details>취소</button>
               <form method="post" action="/profile/body-photo/delete"><button class="btn btn-danger">삭제</button></form>
             </div>
           </div>
@@ -1172,7 +1223,7 @@ PROFILE_HTML = """{% extends "app_base.html" %}
 """
 
 BODY_PHOTO_HTML = """{% extends "app_base.html" %}
-{% from "photo_picker.html" import picker_css, picker_js, silhouette, body_guide %}
+{% from "photo_picker.html" import picker_css, picker_js, silhouette, body_guide with context %}
 {% block title %}전신 사진{% endblock %}
 {% block page_head %}
 {{ picker_css() }}
@@ -1183,6 +1234,8 @@ BODY_PHOTO_HTML = """{% extends "app_base.html" %}
   .reg form { margin-top: 20px; }
   /* 세로 2:3 틀이 한 화면에 들어오게 (찍기·자르기 중에는 설명 문장 숨김) */
   .reg .frame { width: clamp(220px, calc((100dvh - 380px) * 2 / 3), 360px); max-width: 100%; }
+  .reg .cam video { object-fit: contain; }
+  .reg .frame.crop { background: #fff; }
   .reg:not([data-state="choose"]) .lead { display: none; }
   .reg .drop { aspect-ratio: auto; padding: 32px 20px; }
   .drop .mini { display: block; height: 132px; margin: 0 auto; }
@@ -1204,6 +1257,9 @@ BODY_PHOTO_HTML = """{% extends "app_base.html" %}
   {% if welcome %}<p class="step">2 / 2 · 전신 사진</p>{% endif %}
   <h1>{{ "전신 사진 바꾸기" if has_photo else "전신 사진" }}</h1>
   <p class="soft lead" style="margin:6px 0 0">머리끝부터 발끝까지 나오게 찍어 주세요.</p>
+  {% if photo_policy == 'session' %}<p class="privacy">전신 사진과 착샷은 DB·파일에 저장하지 않고
+  서버 메모리에서만 처리합니다. 로그아웃 또는 30분 미사용 시 삭제되며, 서버 재시작 시에도 사라집니다.
+  등록한 옷과 추천·피드백은 유지됩니다.</p>{% endif %}
 
   <form class="stack" method="post" action="/profile/body-photo" enctype="multipart/form-data"
         novalidate data-loading="저장 중…" id="upload-form">
@@ -1211,23 +1267,25 @@ BODY_PHOTO_HTML = """{% extends "app_base.html" %}
     <!-- 실제로 서버에 보내는 세로 2:3 사진 (1080x1620 JPEG) -->
     <input type="file" name="file" id="file" accept="image/jpeg" hidden>
     <input type="file" id="pick" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif,.hif" hidden>
-    <input type="file" id="snap" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif,.hif" capture="environment" hidden>
+    <input type="file" id="snap" accept="image/*" capture="environment" hidden>
 
     <section class="s-choose">
       <div class="drop{% if file_error %} invalid{% endif %}" id="drop">
         <div>
           {{ silhouette("mini") }}
           <strong>머리끝부터 발끝까지 나오게</strong>
-          <small>세로 사진 · JPG, PNG, HEIC, HEIF · 10MB 이하</small>
+          <small>세로 2:3으로 저장 · JPG, PNG, HEIC, HEIF · 10MB 이하</small>
+          <p class="album-guide" id="album-guide">앨범에서는 머리끝부터 신발까지 보이고 위아래에 여백이 있는 세로 사진을 골라 주세요.</p>
           <div class="pick-btns">
-            <button type="button" class="btn btn-primary" id="btn-camera">카메라로 찍기</button>
-            <button type="button" class="btn btn-secondary" id="btn-album">앨범에서 고르기</button>
+            <button type="button" class="btn btn-primary" id="btn-camera">웹 카메라로 찍기</button>
+            <button type="button" class="btn btn-secondary" id="btn-native-camera">기본 카메라로 찍기</button>
+            <button type="button" class="btn btn-secondary" id="btn-album" aria-describedby="album-guide">앨범에서 고르기</button>
           </div>
         </div>
       </div>
     </section>
 
-    <section class="s-camera" aria-label="카메라">
+    <section class="s-camera" aria-label="세로 2:3 카메라">
       <div class="frame cam"><video id="video" playsinline muted autoplay></video>{{ body_guide() }}<div class="count" id="countdown" aria-live="assertive"></div></div>
       <div class="cam-bar">
         <button type="button" class="btn btn-ghost left" id="cam-cancel">취소</button>
@@ -1238,15 +1296,15 @@ BODY_PHOTO_HTML = """{% extends "app_base.html" %}
           <button type="button" class="btn btn-ghost" id="cam-flip" hidden>전환</button>
         </div>
       </div>
-      <p class="hint center">머리끝·발끝을 노란 선 안에</p>
+      <p class="hint center">세로 2:3 · 머리끝과 신발을 모두 담고 발 아래 여백을 남겨 주세요.</p>
     </section>
 
     <section class="s-crop" aria-label="사진 자르기">
       <div class="frame crop" id="crop"><img id="crop-img" alt="자를 사진">{{ body_guide() }}</div>
-      <p class="hint center">끌어서 옮기고 확대해서 노란 선 안에 맞추기</p>
+      <p class="hint center">세로 2:3 틀에서 머리끝과 신발이 노란 선 안에 들어오도록 조절해 주세요.</p>
       <div class="zoom-row">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
-        <input type="range" id="zoom" min="1" max="4" step="0.01" value="1" aria-label="확대">
+        <input type="range" id="zoom" min="1" max="4" step="0.01" value="1" aria-label="사진 배율">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5v14"/></svg>
       </div>
       <div class="two">
@@ -1268,7 +1326,9 @@ BODY_PHOTO_HTML = """{% extends "app_base.html" %}
 
     <label class="privacy"><input type="checkbox" name="consent_body_photo" value="1" required>
       전신 사진 저장 및 착샷 생성 활용에 동의합니다.</label>
-    <p class="privacy">사진은 내 계정에 저장되며 연결된 착샷 서버에서 처리됩니다. 프로필에서 삭제할 수 있습니다.</p>
+    {% if photo_policy != 'session' %}
+    <p class="privacy">사진은 로그인 종료 후에도 보관돼요. 착샷의 의류별 처리 이미지와 최종 결과도 저장되며, 품질 확인을 위해 관리자가 확인할 수 있어요. 프로필에서 전신 사진과 모든 착샷·처리 이미지를 함께 삭제할 수 있어요.</p>
+    {% endif %}
 
     <div class="actions">
       <button type="submit" class="btn btn-primary" id="upload-btn">저장</button>
@@ -1278,15 +1338,16 @@ BODY_PHOTO_HTML = """{% extends "app_base.html" %}
 </div>
 {% endblock %}
 {% block script %}
-{{ picker_js(1080, 1620, "body.jpg", 512) }}
+{{ picker_js(1080, 1620, "body.jpg", 512, fit_full_photo=True) }}
 {% endblock %}
 """
 
 WARDROBE_HTML = """{% extends "app_base.html" %}
-{% from "macros.html" import garment_art %}
+{% from "macros.html" import garment_art, term_guide %}
 {% block title %}내 옷장{% endblock %}
 {% block page_head %}
 <style>
+  #wardrobe-more[hidden] { display: none; }
   .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
   .page-head p { margin: 4px 0 0; }
   .add-btn { height: 40px; padding: 0 14px; font-size: .9375rem; flex-shrink: 0; }
@@ -1375,6 +1436,12 @@ WARDROBE_HTML = """{% extends "app_base.html" %}
   <a class="btn btn-primary" href="/garments/new">옷 등록하기</a>
 </section>
 {% elif total > 0 %}
+{% if garments | selectattr('is_example') | list %}
+<div class="notice" style="margin:16px 0" data-starter-notice>
+  <p>체험용 예시 옷이 포함되어 있어요. 내 옷을 추가하고, 예시 옷은 자유롭게 수정·삭제할 수 있어요.</p>
+  <a class="btn btn-secondary" href="/recommend">이 옷으로 코디 추천받기</a>
+</div>
+{% endif %}
 <form class="search" method="get" action="/wardrobe" role="search">
   {% if category %}<input type="hidden" name="category" value="{{ category }}">{% endif %}
   {% if status_filter %}<input type="hidden" name="status" value="{{ status_filter }}">{% endif %}
@@ -1400,29 +1467,13 @@ WARDROBE_HTML = """{% extends "app_base.html" %}
 </div>
 
 {% if garments %}
-<ul class="grid" role="list" style="list-style:none;padding:0">
-  {% for g in garments %}
-  <li class="card{% if g.status != 'available' %} off{% endif %}">
-    <a class="card-link" href="/garments/{{ g.garment_id }}">
-    <div class="thumb">
-      {% if g.status != "available" %}<span class="badge {{ g.status }}">{{ g.status | ko("status") }}</span>{% endif %}
-      {{ garment_art(g) }}
-    </div>
-    <div class="card-body">
-      <h2>{{ garment_name(g) }}</h2>
-      <div class="meta">
-        <span class="dot{% if g.color == 'multi' %} multi{% endif %}" style="background-color: {{ color_hex(g.color) }}"></span>
-        {{ (g.color or "unknown") | ko("color") }}{% if g.name and g.subcategory %} · {{ g.subcategory | ko("subcategory") }}{% elif g.pattern not in ("solid", "unknown") %} · {{ g.pattern | ko("pattern") }}{% endif %}
-      </div>
-      {% if g.location %}<div class="loc"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s7-6.1 7-12a7 7 0 0 0-14 0c0 5.9 7 12 7 12Z"/><circle cx="12" cy="9" r="2.5"/></svg>{{ g.location }}</div>{% endif %}
-      {% if g.style_candidates %}
-      <div class="tags">{% for s in g.style_candidates[:2] %}<span>{{ s | ko("style") }}</span>{% endfor %}</div>
-      {% endif %}
-    </div>
-    </a>
-  </li>
-  {% endfor %}
+<ul id="wardrobe-grid" class="grid" role="list" style="list-style:none;padding:0">
+  {% include "wardrobe_cards.html" %}
 </ul>
+<nav aria-label="옷 더 보기" id="wardrobe-pager">
+  <p id="wardrobe-progress" role="status" aria-live="polite">{{ garments|length }}벌 표시 · 조건에 맞는 옷 {{ matched_count }}벌</p>
+  <a id="wardrobe-more" class="btn btn-secondary" {% if next_url %}href="{{ next_url }}"{% else %}hidden{% endif %}>더 보기</a>
+</nav>
 {% else %}
 <section class="empty">
   {% if q %}
@@ -1436,9 +1487,84 @@ WARDROBE_HTML = """{% extends "app_base.html" %}
 {% endif %}
 {% endif %}
 {% endblock %}
+{% block script %}
+<script nonce="{{ request.state.csp_nonce | default('') }}">
+(() => {
+  const grid = document.getElementById('wardrobe-grid');
+  const more = document.getElementById('wardrobe-more');
+  const progress = document.getElementById('wardrobe-progress');
+  if (!grid || !more) return;
+  const seen = new Set([...grid.children].map(e => e.dataset.garmentId));
+  let busy = false, automatic = true;
+  const controller = new AbortController();
+  const observer = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+    if (automatic && entries.some(e => e.isIntersecting)) load();
+  }, {rootMargin:'240px'}) : null;
+  async function load() {
+    if (busy || more.hidden || !more.getAttribute('href')) return;
+    busy = true; more.setAttribute('aria-disabled','true'); grid.setAttribute('aria-busy','true');
+    more.textContent = '불러오는 중…';
+    try {
+      const url = new URL(more.href); url.searchParams.set('partial','true');
+      const response = await fetch(url, {signal:controller.signal, credentials:'same-origin'});
+      if (response.status === 401) { location.assign('/login'); return; }
+      if (!response.ok || response.redirected) throw new Error('load failed');
+      const data = await response.json();
+      const fragment = new DOMParser().parseFromString(data.html, 'text/html');
+      for (const card of fragment.body.children) {
+        if (!card.dataset.garmentId || seen.has(card.dataset.garmentId)) continue;
+        seen.add(card.dataset.garmentId); grid.appendChild(document.importNode(card, true));
+      }
+      if (data.next_url) more.href = data.next_url;
+      else { more.hidden = true; more.removeAttribute('href'); }
+      progress.textContent = `${seen.size}벌 표시` + (data.next_url ? '' : ' · 모두 불러왔어요');
+      automatic = true;
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        automatic = false;
+        progress.textContent = '옷을 불러오지 못했어요. 더 보기를 눌러 다시 시도해 주세요.';
+      }
+    } finally {
+      busy = false; more.textContent = '더 보기'; more.removeAttribute('aria-disabled'); grid.removeAttribute('aria-busy');
+      if (observer) { observer.unobserve(more); if (automatic && !more.hidden) observer.observe(more); }
+    }
+  }
+  more.addEventListener('click', event => { event.preventDefault(); load(); });
+  if (observer && !more.hidden) observer.observe(more);
+  addEventListener('pagehide', () => { controller.abort(); observer?.disconnect(); }, {once:true});
+})();
+</script>
+{% endblock %}
+
 """
 
-PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대로 찍기)·앨범(틀 비율로 자르기). 옷 등록(1:1)·전신 사진(2:3)에서 사용.
+WARDROBE_CARDS_HTML = """{% from "macros.html" import garment_art %}
+  {% for g in garments %}
+  <li data-garment-id="{{ g.garment_id }}" class="card{% if g.status != 'available' %} off{% endif %}">
+    <a class="card-link" href="/garments/{{ g.garment_id }}">
+    <div class="thumb">
+      {% if g.status != "available" %}<span class="badge {{ g.status }}">{{ g.status | ko("status") }}</span>{% endif %}
+      {{ garment_art(g, thumbnail=true) }}
+    </div>
+    <div class="card-body">
+      <h2>{{ garment_name(g) }}</h2>
+      {% if g.is_example %}<div class="tags"><span data-example-badge>예시</span></div>{% endif %}
+      <div class="meta">{{ g.category | ko("category") }}{% if g.subcategory %} · {{ g.subcategory | ko("subcategory") }}{% endif %}</div>
+      <div class="meta">
+        <span class="dot{% if g.color == 'multi' %} multi{% endif %}" style="background-color: {{ color_hex(g.color) }}"></span>
+        {{ (g.color or "unknown") | ko("color") }}{% if g.name and g.subcategory %} · {{ g.subcategory | ko("subcategory") }}{% elif g.pattern not in ("solid", "unknown") %} · <span title="{{ g.pattern | term_description("pattern") }}">{{ g.pattern | ko("pattern") }}</span>{% endif %}
+      </div>
+      {% if g.location %}<div class="loc"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s7-6.1 7-12a7 7 0 0 0-14 0c0 5.9 7 12 7 12Z"/><circle cx="12" cy="9" r="2.5"/></svg>{{ g.location }}</div>{% endif %}
+      {% if g.style_candidates %}
+      <div class="tags">{% for s in g.style_candidates[:2] %}<span title="{{ s | term_description("style") }}">{{ s | ko("style") }}</span>{% endfor %}</div>
+      {% endif %}
+    </div>
+    </a>
+  </li>
+  {% endfor %}
+"""
+
+PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 일반 옷(1:1)·긴 옷/전신 사진(2:3). 긴 옷과 전신 사진은 전체 사진에서 시작.
    화면에 필요한 id: reg(data-state) file pick snap drop btn-camera btn-album video cam-cancel shutter cam-flip
                     crop crop-img zoom crop-cancel crop-ok result redo file-error upload-btn (선택: cam-timer countdown) #}
 {% macro picker_css() %}
@@ -1473,6 +1599,7 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
                stroke-linecap: round; stroke-linejoin: round; }
   .drop strong { display: block; margin-top: 12px; font-size: 1rem; }
   .drop small { display: block; margin-top: 4px; color: var(--ink-soft); }
+  .album-guide { margin: 12px auto 0; max-width: 30ch; color: var(--ink-soft); font-size: .875rem; }
   .pick-btns { display: flex; gap: 8px; justify-content: center; margin-top: 20px; flex-wrap: wrap; }
   .pick-btns .btn { height: 44px; }
 
@@ -1508,10 +1635,12 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
 {% endmacro %}
 
 {# out_w x out_h: 올리는 JPEG 크기 (틀 비율과 같아야 함), min_side: 너무 작은 사진 거르기(px, 0이면 안 함) #}
-{% macro picker_js(out_w, out_h, filename, min_side=0) %}
-<script>
+{% macro picker_js(out_w, out_h, filename, min_side=0, fit_full_photo=False) %}
+<script nonce="{{ request.state.csp_nonce | default('') }}">
 (() => {
-  const OUT_W = {{ out_w }}, OUT_H = {{ out_h }}, RATIO = OUT_W / OUT_H, MIN_SIDE = {{ min_side }};
+  const OUT_W = {{ out_w }}, DEFAULT_OUT_H = {{ out_h }}, MIN_SIDE = {{ min_side }};
+  const BODY_FIT = {{ fit_full_photo | tojson }};
+  let OUT_H = DEFAULT_OUT_H, RATIO = OUT_W / OUT_H, FIT_FULL_PHOTO = BODY_FIT;
   const MAX = 10 * 1024 * 1024;
   const $ = (id) => document.getElementById(id);
   const reg = $("reg"), fileInput = $("file"), pick = $("pick"), snap = $("snap");
@@ -1522,7 +1651,9 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
 
   // ---- 결과 캔버스 → 업로드할 파일로 ------------------------------------
   function finish(canvas) {
+    setState("processing");
     canvas.toBlob((blob) => {
+      if (!blob) { setState("choose"); return showError("사진을 만들지 못했어요. 다시 선택해 주세요."); }
       const dt = new DataTransfer();
       dt.items.add(new File([blob], {{ filename | tojson }}, { type: "image/jpeg" }));
       fileInput.files = dt.files;
@@ -1537,7 +1668,8 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
   }
   $("redo").addEventListener("click", () => { fileInput.value = ""; showError(""); setState("choose"); });
 
-  // ---- 앨범·드래그 → 자르기 ---------------------------------------------
+  // ---- 기본 카메라·앨범·드래그 → 자르기 --------------------------------
+  $("btn-native-camera").addEventListener("click", () => snap.click());
   $("btn-album").addEventListener("click", () => pick.click());
   pick.addEventListener("change", () => loadFile(pick.files[0]));
   snap.addEventListener("change", () => loadFile(snap.files[0]));
@@ -1569,9 +1701,7 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
       }
       const blob = await response.blob();
       if (current !== conversion) return;
-      if (cropUrl) URL.revokeObjectURL(cropUrl);
-      cropUrl = URL.createObjectURL(blob);
-      startCrop(cropUrl);
+      showCrop(blob, current);
     } catch (error) {
       if (current === conversion && error.name !== "AbortError") showError(error.message);
     } finally {
@@ -1584,10 +1714,12 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
   let bw = 0, bh = 0, base = 1, scale = 1, x = 0, y = 0;
   const pts = new Map();
 
-  function startCrop(url, sequence = conversion) {
+  function showCrop(blob, sequence, minSide = MIN_SIDE) {
+    if (cropUrl) URL.revokeObjectURL(cropUrl);
+    cropUrl = URL.createObjectURL(blob);
     cropImg.onload = () => {
       if (sequence !== conversion) return;
-      if (Math.min(cropImg.naturalWidth, cropImg.naturalHeight) < MIN_SIDE) {
+      if (Math.min(cropImg.naturalWidth, cropImg.naturalHeight) < minSide) {
         setState("choose");
         return showError("사진이 너무 작아요. 더 크게 찍은 사진을 골라 주세요.");
       }
@@ -1596,20 +1728,25 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
     cropImg.onerror = () => {
       if (sequence === conversion) showError("사진을 열 수 없어요. 다른 사진을 골라 주세요.");
     };
-    cropImg.src = url;
+    cropImg.src = cropUrl;
   }
   function layout() {
     bw = cropBox.clientWidth; bh = cropBox.clientHeight;
     const w = cropImg.naturalWidth, h = cropImg.naturalHeight;
     cropImg.style.width = w + "px"; cropImg.style.height = h + "px";
-    base = Math.max(bw / w, bh / h);            // 틀을 꽉 채우는 최소 배율
+    // 전신 사진의 머리/발 여백은 유지. 긴 옷은 네 변에 3% 이상 여백을 두고 전체를 맞춥니다.
+    const usable = BODY_FIT ? 0.86 : 0.94, topMargin = BODY_FIT ? 0.05 : 0.03;
+    base = FIT_FULL_PHOTO ? Math.min(bw * (BODY_FIT ? 1 : 0.94) / w, bh * usable / h) : Math.max(bw / w, bh / h);
     scale = base; zoom.value = 1;
-    x = (bw - w * scale) / 2; y = (bh - h * scale) / 2;
+    x = (bw - w * scale) / 2;
+    y = FIT_FULL_PHOTO ? bh * topMargin + (bh * usable - h * scale) / 2 : (bh - h * scale) / 2;
     apply();
   }
   function apply() {
     const w = cropImg.naturalWidth * scale, h = cropImg.naturalHeight * scale;
-    x = Math.min(0, Math.max(bw - w, x)); y = Math.min(0, Math.max(bh - h, y));   // 빈 곳이 안 생기게
+    // 축소 상태에서는 여백 안에서, 확대 상태에서는 틀 안에서 이동합니다.
+    x = Math.min(Math.max(0, bw - w), Math.max(Math.min(0, bw - w), x));
+    y = Math.min(Math.max(0, bh - h), Math.max(Math.min(0, bh - h), y));
     cropImg.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
   }
   function zoomTo(z, cx = bw / 2, cy = bh / 2) {
@@ -1645,7 +1782,8 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
   $("crop-cancel").addEventListener("click", () => setState("choose"));
   $("crop-ok").addEventListener("click", () => {
     const [c, ctx] = blank();
-    ctx.drawImage(cropImg, -x / scale, -y / scale, bw / scale, bh / scale, 0, 0, OUT_W, OUT_H);
+    const sx = OUT_W / bw, sy = OUT_H / bh;
+    ctx.drawImage(cropImg, x * sx, y * sy, cropImg.naturalWidth * scale * sx, cropImg.naturalHeight * scale * sy);
     finish(c);
   });
 
@@ -1660,16 +1798,31 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) return snap.click();
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1920 } }, audio: false,
+        video: {
+          facingMode: { ideal: facing },
+          aspectRatio: { ideal: RATIO },
+          width: { ideal: OUT_W },
+          height: { ideal: OUT_H },
+        },
+        audio: false,
       });
-    } catch {
-      return showError("카메라를 쓸 수 없어요. 권한을 허용하거나 앨범에서 골라 주세요.");
+    } catch (error) {
+      setState("choose");
+      const detail = error.name === "NotAllowedError"
+        ? "웹 카메라를 열 수 없어요. Chrome과 기기의 카메라 권한을 확인해 주세요."
+        : "웹 카메라를 열 수 없어요.";
+      return showError(detail + " 기본 카메라로 찍거나 앨범에서 골라 주세요.");
     }
     video.srcObject = stream;
     video.classList.toggle("mirror", facing === "user");
     showError(""); setState("camera");
-    const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
-    flip.hidden = cams.length < 2;
+    flip.hidden = true;
+    try {
+      const cameras = await navigator.mediaDevices.enumerateDevices();
+      flip.hidden = cameras.filter((device) => device.kind === "videoinput").length < 2;
+    } catch {
+      // 촬영은 계속 가능하고 카메라 전환만 숨깁니다.
+    }
   }
   function stopCount() {
     clearInterval(ticking); ticking = null;
@@ -1681,6 +1834,24 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
   function capture() {
     const vw = video.videoWidth, vh = video.videoHeight;
     if (!vw || !vh) return;
+    if (FIT_FULL_PHOTO) {
+      const current = ++conversion;
+      controller?.abort();
+      $("photo-status").textContent = "";
+      const frame = document.createElement("canvas");
+      frame.width = vw; frame.height = vh;
+      const ctx = frame.getContext("2d");
+      if (facing === "user") { ctx.translate(vw, 0); ctx.scale(-1, 1); }
+      ctx.drawImage(video, 0, 0, vw, vh);
+      stopCamera();
+      setState("choose");
+      frame.toBlob((blob) => {
+        if (current !== conversion) return;
+        if (blob) showCrop(blob, current, 0);
+        else showError("사진을 준비하지 못했어요. 다시 찍어 주세요.");
+      }, "image/jpeg", 0.95);
+      return;
+    }
     // 화면에 보이는 가운데 부분(틀 비율)만 사용
     const sw = vw / vh > RATIO ? vh * RATIO : vw, sh = sw / RATIO;
     const [c, ctx] = blank();
@@ -1711,6 +1882,35 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
   });
   window.addEventListener("pagehide", stopCamera);
 
+  // 옷 등록에서만 사진 형태를 바꿉니다. 카메라/완료 상태에서는 선택지를 숨겨
+  // 촬영 중 비율이나 이미 생성한 파일의 형식이 뒤바뀌지 않게 합니다.
+  const photoModes = [...document.querySelectorAll('input[name="photo_mode"]')];
+  function updatePhotoMode() {
+    const long = photoModes.some(input => input.checked && input.value === "long");
+    OUT_H = long ? 1620 : DEFAULT_OUT_H; RATIO = OUT_W / OUT_H;
+    FIT_FULL_PHOTO = BODY_FIT || long;
+    reg.dataset.photoMode = long ? "long" : "square";
+    reg.style.setProperty("--ar", `${OUT_W} / ${OUT_H}`);
+    $("photo-format").textContent = (long ? "세로 2:3" : "정사각형 1:1") + "로 저장 · JPG, PNG, HEIC, HEIF · 10MB 이하";
+    $("album-guide").textContent = long
+      ? "롱패딩·긴 코트·긴 바지처럼 긴 옷은 목 부분부터 밑단까지 전부 보이는 사진을 골라 주세요. 전체 사진이 세로 2:3 틀에 먼저 들어오며, 남는 공간은 흰 여백으로 저장돼요."
+      : "앨범에서는 옷 한 벌이 전부 보이고 가장자리에 여백이 있는 사진을 골라 주세요. 선택 후 정사각형으로 자를 수 있어요.";
+    $("garment-camera").setAttribute("aria-label", long ? "세로 2:3 카메라" : "정사각형 1:1 카메라");
+    $("garment-camera-hint").textContent = long
+      ? "세로 2:3 · 옷 전체와 밑단이 보이게 찍어 주세요. 촬영 후 전체 사진을 보면서 여백과 크기를 조절해요."
+      : "정사각형 1:1 · 옷 한 벌이 격자 안에 전부 들어오게 찍어 주세요.";
+    $("garment-crop-hint").textContent = long
+      ? "세로 2:3 · 전체 사진에서 시작해요. 확대할 때 목 부분·소매·밑단이 잘리지 않는지 확인해 주세요."
+      : "정사각형 1:1 틀에 옷 한 벌이 전부 들어오도록 조절해 주세요.";
+    $("native-camera-guide").textContent = long
+      ? "휴대폰 기본 카메라의 촬영 비율은 기기 설정을 따릅니다. 세로로 옷 전체를 찍으면 이후 2:3으로 조절할 수 있어요."
+      : "휴대폰 기본 카메라의 촬영 비율은 기기 설정을 따릅니다. 이후 선택한 틀에 맞춰 조절해요.";
+    if (reg.dataset.state === "crop") layout();
+  }
+  if (photoModes.length) {
+    photoModes.forEach(input => input.addEventListener("change", updatePhotoMode));
+    updatePhotoMode();
+  }
   setState("choose");
 })();
 </script>
@@ -1726,17 +1926,17 @@ PHOTO_PICKER_HTML = """{# 사진 올리기 공통: 카메라(틀 비율 그대�
 {# 카메라·자르기·결과 위에 겹치는 가이드: 머리끝·발끝 선 (+ 실루엣) #}
 {% macro body_guide(sil=True) -%}
 <svg class="guide{{ '' if sil else ' no-sil' }}" viewBox="0 0 200 300" aria-hidden="true">
-  {% if sil %}<g class="sil"><ellipse cx="100" cy="42" rx="15" ry="18"/>
+  {% if sil %}<g class="sil" transform="translate(0 6) scale(1 0.94)"><ellipse cx="100" cy="42" rx="15" ry="18"/>
   <path d="M92 60Q100 64 108 60L109 66 126 71Q133 73 134 81L146 152Q147 159 141 160L137 159 124 98 121 150 118 278H103L100 178 97 278H82L79 150 76 98 63 159 59 160Q53 159 54 152L66 81Q67 73 74 71L91 66Z"/></g>{% endif %}
-  <path class="line" d="M0 14H200M0 287H200"/>
+  <path class="line" d="M0 15H200M0 273H200"/>
   <text x="12" y="10">머리끝은 이 선 아래</text>
-  <text x="12" y="297">발끝은 이 선 위</text>
+  <text x="12" y="286">발끝은 이 선 위</text>
 </svg>
 {%- endmacro %}
 """
 
 GARMENT_NEW_HTML = """{% extends "app_base.html" %}
-{% from "photo_picker.html" import picker_css, picker_js %}
+{% from "photo_picker.html" import picker_css, picker_js with context %}
 {% block title %}옷 등록{% endblock %}
 {% block page_head %}
 {{ picker_css() }}
@@ -1744,6 +1944,14 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
   .reg { max-width: 480px; margin: 0 auto; }
   .step { margin: 0 0 6px; font-size: .8125rem; font-weight: 600; color: var(--ink-soft); }
   .reg form { margin-top: 24px; }
+  .photo-modes { border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .photo-modes label { display: flex; align-items: center; gap: 8px; padding: 8px 0; cursor: pointer; }
+  .photo-modes input { width: auto; }
+  .reg:not([data-state="choose"]):not([data-state="crop"]) .photo-modes { display: none; }
+  .reg[data-photo-mode="long"] .frame { width: clamp(220px, calc((100dvh - 380px) * 2 / 3), 360px); max-width: 100%; }
+  .reg[data-photo-mode="long"] .cam video { object-fit: contain; }
+  .reg[data-photo-mode="long"] .frame.crop { background: #fff; }
+  .reg[data-photo-mode="long"] .drop { aspect-ratio: auto; padding: 32px 20px; }
 </style>
 {% endblock %}
 {% block content %}
@@ -1753,37 +1961,57 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
 
   <form class="stack" method="post" action="/garments/new" enctype="multipart/form-data"
         novalidate data-loading="사진 분석 중…" id="upload-form">
-    <!-- 실제로 서버에 보내는 1:1 사진 (자르기·촬영 결과를 여기에 넣음) -->
+    <fieldset class="field">
+      <legend>착용 역할</legend>
+      <div class="chips">
+        <label class="chip"><input type="radio" name="wearing_role" value="" {% if not wearing_role %}checked{% endif %}><span>분석 후 선택</span></label>
+        {% for role in ["top", "bottom", "outerwear"] %}
+        <label class="chip"><input type="radio" name="wearing_role" value="{{ role }}" {% if wearing_role == role %}checked{% endif %}><span>{{ role | ko("category") }}</span></label>
+        {% endfor %}
+      </div>
+      <p class="soft">티셔츠 위에 걸치는 셔츠도 아우터예요. 미리 선택하면 자동 분석에서도 이 역할을 유지해요. 옷 형태는 다음 화면에서 따로 확인해 주세요.</p>
+    </fieldset>
+    <fieldset class="photo-modes">
+      <legend>옷 사진 형태</legend>
+      <label><input type="radio" name="photo_mode" value="square" {% if photo_mode != 'long' %}checked{% endif %}>일반 옷 — 정사각형 1:1</label>
+      <label><input type="radio" name="photo_mode" value="long" {% if photo_mode == 'long' %}checked{% endif %}>롱패딩·긴 코트 등 — 세로 2:3</label>
+      <p class="soft">긴 옷이 정사각형에 잘릴 때만 세로형을 선택하세요. 사진을 고르기 전이나 자르기 화면에서 바꿀 수 있어요. 의류 종류는 분석 후 확인합니다.</p>
+    </fieldset>
+    <!-- 일반 옷 1080x1080 / 긴 옷 1080x1620 JPEG -->
     <input type="file" name="file" id="file" accept="image/jpeg" hidden>
     <input type="file" id="pick" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif,.hif" hidden>
-    <input type="file" id="snap" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif,.hif" capture="environment" hidden>
+    <input type="file" id="snap" accept="image/*" capture="environment" hidden>
 
     <section class="s-choose">
       <div class="drop{% if file_error %} invalid{% endif %}" id="drop">
         <div>
           <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9.3h16M4 14.7h16M9.3 4v16M14.7 4v16" opacity=".35"/></svg>
           <strong>옷 사진</strong>
-          <small>1:1 · JPG, PNG, HEIC, HEIF · 10MB 이하</small>
+          <small id="photo-format">정사각형 1:1로 저장 · JPG, PNG, HEIC, HEIF · 10MB 이하</small>
+          <p class="album-guide" id="album-guide">앨범에서는 옷 한 벌이 전부 보이고 가장자리에 여백이 있는 사진을 골라 주세요. 선택 후 정사각형으로 자를 수 있어요.</p>
           <div class="pick-btns">
-            <button type="button" class="btn btn-primary" id="btn-camera">카메라로 찍기</button>
-            <button type="button" class="btn btn-secondary" id="btn-album">앨범에서 고르기</button>
+            <button type="button" class="btn btn-primary" id="btn-camera">웹 카메라로 찍기</button>
+            <button type="button" class="btn btn-secondary" id="btn-native-camera">기본 카메라로 찍기</button>
+            <button type="button" class="btn btn-secondary" id="btn-album" aria-describedby="album-guide">앨범에서 고르기</button>
           </div>
+          <p class="album-guide" id="native-camera-guide">휴대폰 기본 카메라의 촬영 비율은 기기 설정을 따릅니다. 이후 선택한 틀에 맞춰 조절해요.</p>
         </div>
       </div>
     </section>
 
-    <section class="s-camera" aria-label="카메라">
+    <section class="s-camera" id="garment-camera" aria-label="정사각형 1:1 카메라">
       <div class="frame cam"><video id="video" playsinline muted autoplay></video><div class="thirds"></div></div>
       <div class="cam-bar">
         <button type="button" class="btn btn-ghost left" id="cam-cancel">취소</button>
         <button type="button" class="shutter" id="shutter" aria-label="사진 찍기"></button>
         <div class="right"><button type="button" class="btn btn-ghost" id="cam-flip" hidden>카메라 전환</button></div>
       </div>
+      <p class="hint" id="garment-camera-hint">정사각형 1:1 · 옷 한 벌이 격자 안에 전부 들어오게 찍어 주세요.</p>
     </section>
 
     <section class="s-crop" aria-label="사진 자르기">
       <div class="frame crop" id="crop"><img id="crop-img" alt="자를 사진"><div class="thirds"></div></div>
-      <p class="hint">끌어서 옮기고 확대해서 맞추기</p>
+      <p class="hint" id="garment-crop-hint">정사각형 1:1 틀에 옷 한 벌이 전부 들어오도록 조절해 주세요.</p>
       <div class="zoom-row">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
         <input type="range" id="zoom" min="1" max="4" step="0.01" value="1" aria-label="확대">
@@ -1818,7 +2046,7 @@ GARMENT_NEW_HTML = """{% extends "app_base.html" %}
 """
 
 GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
-{% from "macros.html" import garment_art, field %}
+{% from "macros.html" import garment_art, field, term_guide, term_chip %}
 {% block title %}옷 정보 확인{% endblock %}
 {% block page_head %}
 <style>
@@ -1883,32 +2111,32 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
     <div>
       <form class="stack" method="post" action="/garments/{{ g.garment_id }}/{{ 'edit' if mode == 'edit' else 'confirm' }}" novalidate data-loading="저장 중…">
         <fieldset class="field">
-          <legend>종류</legend>
+          <legend>착용 역할</legend>
           <div class="chips">
             {% for c in CATEGORY_ORDER %}
             <label class="chip"><input type="radio" name="category" value="{{ c }}" {% if form.category == c %}checked{% endif %}><span>{{ c | ko("category") }}</span></label>
             {% endfor %}
           </div>
           {% if errors.category %}<p class="field-error">{{ errors.category }}</p>{% endif %}
+          <p class="soft">다른 상의 위에 걸치는 셔츠·가디건은 아우터로 선택하세요. 선택한 역할은 재분석해도 유지돼요.</p>
         </fieldset>
 
         <div class="field">
-          <label for="subcategory">세부 종류</label>
+          <label for="subcategory">옷 형태</label>
           <select id="subcategory" name="subcategory">
             <option value="">선택 안 함</option>
-            {% for c in CATEGORY_ORDER %}
-            <optgroup label="{{ c | ko('category') }}" data-category="{{ c }}">
-              {% for sub in SUBCATEGORIES[c] %}
-              <option value="{{ sub }}" {% if form.category == c and form.subcategory == sub %}selected{% endif %}>{{ sub | ko("subcategory") }}</option>
-              {% endfor %}
-            </optgroup>
+            {% for sub in GARMENT_TYPES %}
+              <option value="{{ sub }}" {% if form.subcategory == sub %}selected{% endif %}>{{ sub | ko("subcategory") }}</option>
             {% endfor %}
+            {% if form.subcategory and form.subcategory not in GARMENT_TYPES %}
+              <option value="{{ form.subcategory }}" selected>{{ form.subcategory | ko("subcategory") }}</option>
+            {% endif %}
           </select>
           {% if errors.subcategory %}<p class="field-error">{{ errors.subcategory }}</p>{% endif %}
         </div>
 
         {{ field("name", "이름", value=form.name, error=errors.name, maxlength=30,
-                 placeholder="예: 유니클로 네이비 니트", hint="비워 두면 세부 종류(니트 등)로 보여요.",
+                 placeholder="예: 유니클로 네이비 니트", hint="비워 두면 옷 형태(니트 등)로 보여요.",
                  autofocus=errors.name) }}
 
         <fieldset class="field">
@@ -1931,9 +2159,10 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
           <legend>패턴</legend>
           <div class="chips">
             {% for pt in LABELS["pattern"] %}
-            <label class="chip"><input type="radio" name="pattern" value="{{ pt }}" {% if form.pattern == pt %}checked{% endif %}><span>{{ chip_label.get(pt) or (pt | ko("pattern")) }}</span></label>
+            {{ term_chip("pattern", pt, "pattern", form.pattern == pt, chip_label.get(pt)) }}
             {% endfor %}
           </div>
+          {{ term_guide("pattern") }}
           {% if errors.pattern %}<p class="field-error">{{ errors.pattern }}</p>{% endif %}
         </fieldset>
 
@@ -1941,9 +2170,10 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
           <legend>스타일 <small>최대 {{ MAX_STYLES }}개</small></legend>
           <div class="chips" id="styles">
             {% for st in LABELS["style"] %}
-            <label class="chip"><input type="checkbox" name="styles" value="{{ st }}" {% if st in form.styles %}checked{% endif %}><span>{{ st | ko("style") }}</span></label>
+            {{ term_chip("style", st, "styles", st in form.styles) }}
             {% endfor %}
           </div>
+          {{ term_guide("style") }}
           {% if errors.styles %}<p class="field-error">{{ errors.styles }}</p>{% endif %}
         </fieldset>
 
@@ -1979,20 +2209,7 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
 </div>
 {% endblock %}
 {% block script %}
-<script>
-  // 고른 종류의 세부 종류만 보여주기
-  const sub = document.getElementById("subcategory");
-  function syncSub() {
-    const cat = document.querySelector("input[name=category]:checked")?.value;
-    sub.querySelectorAll("optgroup").forEach(g => {
-      const on = g.dataset.category === cat;
-      g.hidden = !on; g.disabled = !on;
-    });
-    if (sub.selectedOptions[0]?.parentElement.disabled) sub.value = "";
-  }
-  document.querySelectorAll("input[name=category]").forEach(r => r.addEventListener("change", syncSub));
-  syncSub();
-
+<script nonce="{{ request.state.csp_nonce | default('') }}">
   // 색상 이름 표시
   document.querySelectorAll("input[name=color]").forEach(r => r.addEventListener("change", () => {
     document.getElementById("color-name").textContent = r.dataset.name;
@@ -2010,7 +2227,7 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
 """
 
 GARMENT_DETAIL_HTML = """{% extends "app_base.html" %}
-{% from "macros.html" import garment_art %}
+{% from "macros.html" import garment_art, term_guide %}
 {% block title %}{{ garment_name(g) }}{% endblock %}
 {% block page_head %}
 <style>
@@ -2072,16 +2289,17 @@ GARMENT_DETAIL_HTML = """{% extends "app_base.html" %}
     </div>
 
     <div>
-      <p class="kicker">{{ g.category | ko("category") }}{% if g.name and g.subcategory %} · {{ g.subcategory | ko("subcategory") }}{% endif %}</p>
+      <p class="kicker">착용 역할: {{ g.category | ko("category") }}{% if g.subcategory %} · 옷 형태: {{ g.subcategory | ko("subcategory") }}{% endif %}</p>
       <h1>{{ garment_name(g) }}</h1>
+      {% if g.is_example %}<p class="notice">가입할 때 제공된 체험용 예시 옷이에요. 자유롭게 수정하거나 삭제할 수 있어요.</p>{% endif %}
 
       <dl class="props">
         <dt>색상</dt>
         <dd><span class="dot{% if g.color == 'multi' %} multi{% endif %}" style="background-color: {{ color_hex(g.color) }}"></span>{{ (g.color or "unknown") | ko("color") }}</dd>
         <dt>패턴</dt>
-        <dd>{{ g.pattern | ko("pattern") }}</dd>
+        <dd title="{{ g.pattern | term_description("pattern") }}">{{ g.pattern | ko("pattern") }}</dd>
         <dt>스타일</dt>
-        <dd>{% for s in g.style_candidates %}<span class="tag">{{ s | ko("style") }}</span>{% else %}<span class="muted">없음</span>{% endfor %}</dd>
+        <dd>{% for s in g.style_candidates %}<span class="tag" title="{{ s | term_description("style") }}">{{ s | ko("style") }}</span>{% else %}<span class="muted">없음</span>{% endfor %}</dd>
         <dt>두께</dt>
         <dd>{% if g.thermal_level %}{{ g.thermal_level | ko("thermal_level") }}{% else %}<span class="muted">모름</span>{% endif %}</dd>
         <dt>위치</dt>
@@ -2093,19 +2311,43 @@ GARMENT_DETAIL_HTML = """{% extends "app_base.html" %}
         <form method="post" action="/garments/{{ g.garment_id }}/status" class="seg" role="group" aria-labelledby="status-title">
           {% for s in ["available", "laundry", "inactive"] %}
           <button name="status" value="{{ s }}" aria-pressed="{{ 'true' if g.status == s else 'false' }}"
-                  {% if g.status == s %}type="button"{% endif %}>{{ s | ko("status") }}</button>
+                  {% if g.status == s %}type="button"{% endif %}>{{ "세탁 완료" if s == "available" and g.status == "laundry" else s | ko("status") }}</button>
           {% endfor %}
         </form>
       </section>
 
+      <section class="block">
+        <h2>세탁 기준</h2>
+        <p class="muted">세탁 후 착용 {{ g.wear_count }}회</p>
+        <form method="post" action="/garments/{{ g.garment_id }}/laundry-interval" class="two">
+          <label>세탁까지 착용 횟수
+            <select name="wears_before_laundry">
+              {% for count in [1, 2] %}
+              <option value="{{ count }}"{% if g.wears_before_laundry == count %} selected{% endif %}>{{ count }}회</option>
+              {% endfor %}
+            </select>
+          </label>
+          <button class="btn btn-secondary">저장</button>
+        </form>
+        {% if g.status == "available" %}
+        <form method="post" action="/garments/{{ g.garment_id }}/wear" data-loading="기록 중…">
+          <button class="btn btn-primary">착용 기록</button>
+        </form>
+        {% endif %}
+      </section>
+
       <section class="block actions">
+        {% if g.status == "available" and g.analysis_status == "done" and g.category in ["top", "bottom", "outerwear"] %}
+        <a class="btn btn-primary" href="/recommend?required={{ g.garment_id }}">이 옷으로 코디</a>
+        {% endif %}
         <a class="btn btn-secondary" href="/garments/{{ g.garment_id }}/edit">정보 수정</a>
-        <details class="danger" ontoggle="if (this.open) this.querySelector('.confirm-box').scrollIntoView({ block: 'nearest', behavior: 'smooth' })">
+        <a class="btn btn-secondary" href="/garments/{{ g.garment_id }}/layers">누끼 정제·아우터 안쪽 설정</a>
+        <details class="danger" data-confirm-details>
           <summary class="btn btn-ghost">삭제</summary>
           <div class="confirm-box" role="alertdialog" aria-label="삭제 확인">
             <p>이 옷을 삭제할까요? 되돌릴 수 없어요.</p>
             <div class="two">
-              <button type="button" class="btn btn-secondary" onclick="this.closest('details').open = false">취소</button>
+              <button type="button" class="btn btn-secondary" data-close-details>취소</button>
               <form method="post" action="/garments/{{ g.garment_id }}/delete">
                 <button class="btn btn-danger" style="width:100%">삭제</button>
               </form>
@@ -2127,6 +2369,7 @@ register_templates(
         "profile.html": PROFILE_HTML,
         "body_photo.html": BODY_PHOTO_HTML,
         "wardrobe.html": WARDROBE_HTML,
+        "wardrobe_cards.html": WARDROBE_CARDS_HTML,
         "photo_picker.html": PHOTO_PICKER_HTML,
         "garment_new.html": GARMENT_NEW_HTML,
         "garment_confirm.html": GARMENT_CONFIRM_HTML,
@@ -2134,6 +2377,7 @@ register_templates(
     },
     GENDERS=GENDERS,
     SUBCATEGORIES=SUBCATEGORIES,
+    GARMENT_TYPES=GARMENT_TYPES,
     MAX_STYLES=MAX_STYLES,
     wardrobe_url=wardrobe_url,
     DEMO_EMAIL=auth.DEMO_EMAIL,

@@ -7,11 +7,11 @@ GET    /garments                  200 [GarmentAttributes, ...]   ← shared/cont
 GET    /garments/{id}             200 GarmentAttributes / 404 GARMENT_NOT_FOUND
 POST   /garments  multipart file  201 GarmentAttributes  ← 사진 저장 + B의 extract()로 채운 값
                                   413 파일 초과 / 415 형식 오류
-       프론트가 보내는 사진은 항상 1080×1080 JPEG (1:1)
+       프론트 사진은 일반 옷 1080×1080 JPEG (1:1), 긴 옷 선택 시 1080×1620 JPEG (2:3)
 PATCH  /garments/{id}  JSON 일부   200 GarmentAttributes  ← 사용자가 확인·수정한 값
        {"name", "location", "category", "subcategory", "color", "pattern", "style_candidates", "thermal_level", "status"}
 DELETE /garments/{id}             204                     ← 등록 취소·삭제
-GET    /garments/{id}/image?kind=cutout|original   200 이미지 파일 / 404  ← 프론트 제안 (C 확인 필요)
+GET    /garments/{id}/image?kind=cutout|original|thumbnail   200 인증 이미지 / 404
 
 ⚠ 이름(name)·위치(location)는 contracts.py의 GarmentAttributes에 아직 없음 → 아래 Garment로 프론트에서만 확장.
    C에게 요청: GarmentAttributes(또는 옷 테이블)에 name: str | None, location: str | None 추가, PATCH로 저장.
@@ -20,6 +20,7 @@ GET    /garments/{id}/image?kind=cutout|original   200 이미지 파일 / 404  �
 사진 보여주기: 로그인 토큰이 프론트 서버 쿠키에 있어서 브라우저가 백엔드에서 직접 못 받음
   → 브라우저는 프론트의 /garment-images/{id} 로 요청 → fetch_image()가 토큰을 붙여 백엔드에서 받아 넘겨줌
   누끼(cutout, B)가 아직 없으면 원본(original)으로, 둘 다 없으면 화면에서 옷 그림으로 대체
+  작은 카드는 ?size=thumbnail → kind=thumbnail(최대 384px WebP), 상세·착샷은 기존 크기 유지
 """
 
 from __future__ import annotations
@@ -41,6 +42,10 @@ class Garment(GarmentAttributes):
     name: str | None = None  # 예: "유니클로 네이비 니트"
     location: str | None = None  # 예: "안방 옷장 2칸", "본가"
     analysis_status: Literal["pending", "done", "failed"] = "done"
+    wears_before_laundry: int = 1
+    wear_count: int = 0
+    role_source: Literal["model", "user"] | None = None
+    is_example: bool = False
 
 
 async def list_garments(token: str) -> list[Garment]:
@@ -56,18 +61,59 @@ async def get_garment(token: str, garment_id: str) -> Garment:
     return Garment(**await request("GET", f"/garments/{garment_id}", token=token))
 
 
-async def create_garment(token: str, filename: str, content: bytes, content_type: str) -> Garment:
+async def page_garments(token: str, *, category="", status="", q="", cursor="", limit=24):
+    if USE_MOCK:
+        from shared.garment_terms import LABELS, search_match
+
+        all_items = list(_mock_closet(token))
+        filtered = [g for g in all_items if (not status or g.status == status) and search_match(g, q)]
+        items = [g for g in filtered if not category or g.category == category]
+        offset = int(cursor or 0)
+        more = offset + limit < len(items)
+        return {
+            "items": items[offset : offset + limit],
+            "total": len(all_items),
+            "all_count": len(filtered),
+            "matched_count": len(items),
+            "counts": {c: sum(g.category == c for g in filtered) for c in LABELS["category"]},
+            "has_more": more,
+            "next_cursor": str(offset + limit) if more else None,
+        }
+    params = {
+        k: v for k, v in dict(category=category, status=status, q=q, cursor=cursor, limit=limit).items() if v
+    }
+    data = await request("GET", "/garments/page", token=token, params=params)
+    data["items"] = [Garment(**g) for g in data["items"]]
+    return data
+
+
+async def create_garment(
+    token: str, filename: str, content: bytes, content_type: str, *, wearing_role: str | None = None
+) -> Garment:
     """사진을 올리면 백엔드가 저장하고 Vision(B)으로 속성을 채워서 돌려줍니다."""
     if USE_MOCK:
-        return await _mock_create(token, content, content_type)
+        garment = await _mock_create(token, content, content_type)
+        if wearing_role:
+            garment.category, garment.role_source = wearing_role, "user"
+        return garment
     files = {"file": (filename, content, content_type)}
-    return Garment(**await request("POST", "/garments", token=token, files=files))
+    data = {"wearing_role": wearing_role} if wearing_role else {}
+    return Garment(**await request("POST", "/garments", token=token, files=files, data=data))
 
 
 async def update_garment(token: str, garment_id: str, fields: dict) -> Garment:
     if USE_MOCK:
         return _mock_update(token, garment_id, fields)
     return Garment(**await request("PATCH", f"/garments/{garment_id}", token=token, json=fields))
+
+
+async def record_wear(token: str, garment_id: str) -> Garment:
+    if USE_MOCK:
+        garment = _mock_find(token, garment_id)
+        if garment.status != "available":
+            raise ApiError(409, "입을 수 있는 옷만 착용을 기록할 수 있어요", "GARMENT_BUSY")
+        return _mock_update(token, garment_id, {"wear_count": garment.wear_count + 1})
+    return Garment(**await request("POST", f"/garments/{garment_id}/wear", token=token))
 
 
 async def delete_garment(token: str, garment_id: str) -> None:
@@ -77,11 +123,12 @@ async def delete_garment(token: str, garment_id: str) -> None:
     await request("DELETE", f"/garments/{garment_id}", token=token)
 
 
-def image_url(garment: Garment) -> str | None:
+def image_url(garment: Garment, *, thumbnail: bool = False) -> str | None:
     """화면에서 쓸 옷 사진 주소. None이면 화면이 옷 그림으로 대체."""
-    if USE_MOCK:
-        return f"/garment-images/{garment.garment_id}" if garment.garment_id in _MOCK_IMAGES else None
-    return f"/garment-images/{garment.garment_id}"
+    if USE_MOCK and garment.garment_id not in _MOCK_IMAGES:
+        return None
+    suffix = "?size=thumbnail" if thumbnail else ""
+    return f"/garment-images/{garment.garment_id}{suffix}"
 
 
 def may_have_photo(garment: Garment) -> bool:
@@ -154,6 +201,10 @@ def _mock_update(token: str, garment_id: str, fields: dict) -> Garment:
     closet = _mock_closet(token)
     old = _mock_find(token, garment_id)
     new = old.model_copy(update=fields)
+    if fields.get("status") == "available" and old.status == "laundry":
+        new.wear_count = 0
+    if new.status == "available" and new.wear_count >= new.wears_before_laundry:
+        new.status = "laundry"
     closet[closet.index(old)] = new
     return new
 

@@ -7,5 +7,6 @@ class HealthResponse(BaseModel):
     contract_version: str
     db: str
     db_error: str | None = None
+    vision_error: str | None = None
     adapters: dict[str, str]
     gpu: str | None = None

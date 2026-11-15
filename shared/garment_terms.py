@@ -1,0 +1,156 @@
+"""Shared wardrobe labels/search vocabulary, without frontend or settings imports."""
+
+LABELS: dict[str, dict] = {
+    "category": {
+        "top": "상의",
+        "bottom": "하의",
+        "outerwear": "아우터",
+        "shoes": "신발",
+    },
+    "color": {
+        "black": "블랙",
+        "white": "화이트",
+        "gray": "그레이",
+        "ivory": "아이보리",
+        "beige": "베이지",
+        "brown": "브라운",
+        "camel": "카멜",
+        "khaki": "카키",
+        "navy": "네이비",
+        "blue": "블루",
+        "sky_blue": "스카이블루",
+        "denim": "데님",
+        "green": "그린",
+        "olive": "올리브",
+        "red": "레드",
+        "burgundy": "버건디",
+        "pink": "핑크",
+        "purple": "퍼플",
+        "yellow": "옐로",
+        "orange": "오렌지",
+        "multi": "멀티",
+        "unknown": "색상 미정",
+    },
+    "pattern": {
+        "solid": "무지",
+        "stripe": "스트라이프",
+        "check": "체크",
+        "dot": "도트",
+        "floral": "플라워",
+        "graphic": "그래픽",
+        "other": "기타 패턴",
+        "unknown": "패턴 미정",
+    },
+    "style": {
+        "casual": "캐주얼",
+        "minimal": "미니멀",
+        "street": "스트릿",
+        "formal": "포멀",
+        "dandy": "댄디",
+        "sporty": "스포티",
+        "vintage": "빈티지",
+        "feminine": "페미닌",
+        "amekaji": "아메카지",
+    },
+    "occasion": {
+        "daily": "일상",
+        "work": "출근",
+        "date": "데이트",
+        "interview": "면접",
+        "exercise": "운동",
+        "travel": "여행",
+    },
+    "status": {
+        "available": "입을 수 있음",
+        "laundry": "세탁 중",
+        "inactive": "추천 제외",  # inactive의 뜻은 문서에 없음 — 실제 동작(추천에서 빠짐)대로 표시
+    },
+    "thermal_level": {
+        1: "매우 얇음",
+        2: "얇음",
+        3: "보통",
+        4: "두꺼움",
+        5: "매우 두꺼움",
+    },
+    "subcategory": {
+        "t_shirt": "티셔츠",
+        "shirt": "셔츠",
+        "blouse": "블라우스",
+        "sweater": "니트",
+        "knit": "니트",
+        "sweatshirt": "맨투맨",
+        "hoodie": "후드티",
+        "cardigan": "가디건",
+        "vest": "조끼",
+        "jeans": "청바지",
+        "slacks": "슬랙스",
+        "pants": "바지",
+        "cotton_pants": "면바지",
+        "shorts": "반바지",
+        "skirt": "치마",
+        "jogger": "조거 팬츠",
+        "coat": "코트",
+        "jacket": "재킷",
+        "padding": "패딩",
+        "jumper": "점퍼",
+        "blazer": "블레이저",
+        "sneakers": "스니커즈",
+        "loafers": "로퍼",
+        "boots": "부츠",
+        "sandals": "샌들",
+        "heels": "힐",
+        "dress_shoes": "구두",
+    },
+}
+
+COLOR_WORDS = {
+    "black": "검정 검은 검은색",
+    "white": "흰 흰색 하양 하얀",
+    "gray": "회색 그레이",
+    "ivory": "아이보리 크림",
+    "beige": "베이지",
+    "brown": "갈색 브라운",
+    "camel": "카멜 낙타색",
+    "khaki": "카키",
+    "navy": "남색 네이비 곤색",
+    "blue": "파랑 파란 파란색 청색",
+    "sky_blue": "하늘 하늘색",
+    "denim": "데님 청",
+    "green": "초록 초록색 녹색",
+    "olive": "올리브",
+    "red": "빨강 빨간 빨간색",
+    "burgundy": "버건디 와인",
+    "pink": "분홍 분홍색",
+    "purple": "보라 보라색",
+    "yellow": "노랑 노란 노란색",
+    "orange": "주황 주황색",
+    "multi": "여러색 알록달록",
+}
+
+
+def ko(value, kind):
+    return LABELS.get(kind, {}).get(value, value or "")
+
+
+def search_match(g, query: str) -> bool:
+    """검색: 이름·위치·세부 종류(니트)·종류·색·패턴·스타일·상태를 한글·영어로.
+    여러 단어면 모두 들어 있어야 함 (예: "네이비 니트")."""
+    words = [
+        getattr(g, "name", None) or "",
+        getattr(g, "location", None) or "",
+        g.category or "",
+        ko(g.category, "category"),
+        g.subcategory or "",
+        ko(g.subcategory, "subcategory") if g.subcategory else "",
+        g.color or "",
+        ko(g.color, "color") if g.color else "",
+        COLOR_WORDS.get(g.color or "", ""),
+        g.pattern,
+        ko(g.pattern, "pattern"),
+        ko(g.status, "status"),
+        *g.style_candidates,
+        *(ko(st, "style") for st in g.style_candidates),
+    ]
+    haystack = " ".join(words).lower().replace("_", " ").replace("-", " ")
+    compact = haystack.replace(" ", "")
+    return all(t in haystack or t in compact for t in query.lower().split())

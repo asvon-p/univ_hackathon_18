@@ -8,12 +8,13 @@ from uuid import uuid4
 import httpx
 import pytest
 from PIL import Image
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
+from backend.app.db.engine import create_database_engine as create_engine
 from backend.tests.test_image_normalization import heic_photo
 
 
-@pytest.mark.parametrize("live_api", [{"provider": "local", "invite_code": ""}], indirect=True)
+@pytest.mark.parametrize("live_api", [{"provider": "local"}], indirect=True)
 @pytest.mark.parametrize(
     "live_frontend", [{"body_photo": True}, {"body_photo": True, "mentor": True}], indirect=True
 )
@@ -77,7 +78,6 @@ def test_heic_crop_preview_upload_and_body_photo(live_frontend):
     [
         {
             "provider": "local",
-            "invite_code": "",
             "classifier": "clip",
             "segmentation": "rembg",
             "vision_timeout": 60,

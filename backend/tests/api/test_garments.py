@@ -63,6 +63,24 @@ def test_upload_persists_and_serves_normalized_image(garment_client, db_session,
         assert image.format == "JPEG" and image.size == (64, 32)
 
 
+def test_laundry_cycle_records_wears_and_resets_after_wash(garment_client):
+    item = upload(garment_client).json()
+    path = f"/api/v1/garments/{item['garment_id']}"
+    assert item["wears_before_laundry"] == 1 and item["wear_count"] == 0
+    assert garment_client.post(path + "/wear").json()["status"] == "laundry"
+    assert garment_client.post(path + "/wear").status_code == 409
+    assert garment_client.patch(path, json={"status": "available"}).json()["wear_count"] == 0
+    for invalid in (0, 3, None, True):
+        assert garment_client.patch(path, json={"wears_before_laundry": invalid}).status_code == 422
+    assert garment_client.patch(path, json={"wears_before_laundry": 2}).status_code == 200
+    first = garment_client.post(path + "/wear").json()
+    assert first["wear_count"] == 1 and first["status"] == "available"
+    second = garment_client.post(path + "/wear").json()
+    assert second["wear_count"] == 2 and second["status"] == "laundry"
+    reset = garment_client.patch(path, json={"status": "available"}).json()
+    assert reset["wear_count"] == 0 and reset["wears_before_laundry"] == 2
+
+
 def test_resize_rotation_and_metadata_removal(garment_client):
     exif = Image.Exif()
     exif[274] = 6  # 90도 회전

@@ -25,10 +25,20 @@ def get_current_user(
 ) -> User:
     if credentials is None:
         raise AppError(401, ErrorCode.AUTH_REQUIRED, "로그인이 필요합니다")
-    user_id = decode_access_token(credentials.credentials, settings)
+    user_id, token_version = decode_access_token(credentials.credentials, settings)
     user = UserRepository(db).get(user_id)
     if user is None or not user.is_active:
         raise AppError(401, ErrorCode.AUTH_INVALID_TOKEN, "유효하지 않은 인증 토큰입니다")
+    if token_version != user.auth_token_version:
+        raise AppError(401, ErrorCode.AUTH_TOKEN_EXPIRED, "다시 로그인해 주세요")
+    if user.photo_policy == "session":
+        from backend.app.services.media_session import token_hash, validate
+        from backend.app.services.user_lock import require_active_user
+
+        user = require_active_user(db, user_id, exclusive=True)
+        key = token_hash(credentials.credentials)
+        validate(db, user_id, key)
+        user._photo_session_key = key
     return user
 
 

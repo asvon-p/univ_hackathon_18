@@ -27,7 +27,6 @@ class LoginRequest(BaseModel):
 class SignupRequest(LoginRequest):
     password: SecretStr = Field(min_length=8, max_length=72)
     nickname: str = Field(default="사용자", min_length=1, max_length=50)
-    invite_code: SecretStr | None = Field(default=None, max_length=255)
 
     @field_validator("nickname", mode="before")
     @classmethod
@@ -42,6 +41,7 @@ class AccountDeletionRequest(BaseModel):
 
 
 class UserView(BaseModel):
+    is_admin: bool = False
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID

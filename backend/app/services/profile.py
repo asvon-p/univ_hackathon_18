@@ -30,6 +30,7 @@ class ProfileService:
             consent = consent.replace(tzinfo=UTC)
         return ProfileView(
             user_id=user.id,
+            photo_policy=user.photo_policy,
             nickname=user.nickname,
             gender=profile.gender,
             height_cm=profile.height_cm,
@@ -48,7 +49,13 @@ class ProfileService:
         )
 
     def get(self, user: User) -> ProfileView:
-        return self._view(user, self._owned(user))
+        result = self._view(user, self._owned(user))
+        result.photo_policy = user.photo_policy
+        if user.photo_policy == "session":
+            from backend.app.services.media_session import memory
+
+            result.body_photo_updated_at = memory(self.db, user.id, user._photo_session_key).updated
+        return result
 
     def patch(self, user: User, body: ProfilePatch) -> ProfileView:
         user = require_active_user(self.db, user.id, exclusive=True)
@@ -69,6 +76,9 @@ class ProfileService:
             profile.consent_body_info_at = datetime.now(UTC)
         elif consent is False:
             retired_photo = retire_body_photo(self.db, profile)
+            from backend.app.services.tryon_results import retire_results
+
+            retire_results(self.db, user.id)
             profile.consent_body_info_at = None
             for field in BODY_FIELDS:
                 setattr(profile, field, None)
@@ -77,7 +87,11 @@ class ProfileService:
         for field, value in values.items():
             setattr(profile, field, value)
         self.db.commit()
-        result = self._view(user, profile)
+        if consent is False:
+            from backend.app.services.media_session import discard_user
+
+            discard_user(user.id)
+        result = self.get(user)
         if self.storage is not None:
             cleanup_photo(self.db, self.storage, retired_photo)
         return result

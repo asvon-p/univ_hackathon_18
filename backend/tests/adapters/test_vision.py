@@ -11,6 +11,22 @@ class Boom:
         raise RuntimeError("CUDA out of memory")
 
 
+def test_missing_native_dependency_does_not_stop_other_features():
+    class MissingDependency:
+        name = "local"
+
+        def warmup(self):
+            raise ImportError("native dependency unavailable")
+
+        def extract(self, *args):
+            raise ImportError("native dependency unavailable")
+
+    vision = SafeVision(MissingDependency(), timeout_sec=1)
+    vision.warmup()
+    assert vision.warmup_error == "ImportError"
+    assert not vision.extract("unused.jpg", "G1").result.success
+
+
 class Slow:
     name = "local"
 

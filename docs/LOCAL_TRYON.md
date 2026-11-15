@@ -23,6 +23,8 @@ python -m scripts.frontend_preview --tryon
 - 실행 중인 터미널의 Ctrl+C로도 종료할 수 있습니다. 종료 시 데이터는 삭제하지 않습니다.
 - 멘토 공개 시연 서버(3001/8003)와 별개입니다. GPU는 `127.0.0.1`에만 바인딩됩니다.
 - 멘토 HTTPS 서버도 같은 GPU를 공유할 수 있습니다. 현재 공개 연결은 [멘토 착샷 시연 안내](MENTOR_TRYON.md)를 참고하세요.
+- ResNet 학습은 [GPU 전환 안내](GPU_TRAINING.md)의 `scripts.train_with_gpu`로 실행하면 시작 전 착샷을 중지하고 정상 종료·오류·Ctrl+C 후 자동 복구합니다. 수동 `scripts.tryon_control pause/resume`도 지원합니다.
+  GPU는 웹 실행기와 독립적으로 관리되며 웹 종료 시 자동 종료하지 않습니다. 중지는 `pause`로 요청합니다.
 
 프로필 → **전신 사진**에서 사진을 선택하고 자른 뒤 활용 동의에 체크하고 저장합니다.
 옷장에 사진이 있는 상의·하의를 등록하고 추천을 받으면 **착샷 보기** 버튼이 표시됩니다.
@@ -34,7 +36,7 @@ python -m scripts.frontend_preview --tryon
 - GPU 환경: `.demo/tryon-runtime/venv` (기존 `univ18`과 분리)
 - 모델 가중치: `.demo/tryon-runtime/weights`, `huggingface`
 - GPU 인증 키: `.demo/tryon-runtime/credentials.json` (자동 생성·재사용, 브라우저에는 전달하지 않음)
-- 서버 로그: `.demo/frontend-preview/persistent/tryon.log`
+- 서버 로그: `.demo/tryon-runtime/worker.log` (독립 GPU 실행기)
 - 생성한 테스트 자료: `.demo/tryon-assets/person-01.png` ~ `person-03.png`, `garment-top.png`, `garment-bottom.png`, `garment-outerwear.png`
 - 이미지 생성 프롬프트: `.demo/tryon-assets/prompts.json`
 - 위 `.demo` 파일은 Git에서 제외됩니다. 실제 사람 사진 대신 생성한 가상 성인 이미지입니다.
@@ -67,10 +69,11 @@ python -m scripts.frontend_preview --tryon
 각 3벌로 교체했습니다. 공개 멘토 계정에도 같은 9종을 등록했습니다.
 구성·백업·GPU 화면 검증은 [시연 옷장 교체 기록](DEMO_WARDROBE.md)을 참고하세요.
 
-전신 사진과 옷장 데이터는 재시작 후에도 유지됩니다. 현재 팀원 프론트의 착샷 작업 목록은 메모리 저장이므로
-프론트 재시작 후에는 다시 생성해야 합니다. 생성한 GPU 중간 결과는 로컬 outputs에 저장됩니다.
-착샷 화면의 다운로드 버튼으로 최종 PNG를 별도 저장할 수 있습니다.
-기존 사진을 삭제·교체하거나 탈퇴하면 이전 세션의 착샷 조회를 차단합니다.
+2026-11-11부터 기존 멘토·QA 계정의 완성 착샷은 DB·JPEG 파일로 보관하여 재시작 후에도 조회됩니다.
+고객 검증·새 가입 계정의 전신 사진과 착샷은 메모리에만 두고 로그아웃 또는 30분 미사용 시 삭제합니다.
+새 프론트 요청의 GPU 중간 결과는 outputs에 기록하지 않습니다. 기존 파일은 이번 변경으로 일괄 삭제하지 않습니다.
+원본 사진 삭제와 완성 착샷 삭제는 별개이며 동의 철회·탈퇴 시 보관 결과도 정리합니다.
+세부 정책과 **내 착샷** 사용법은 [사진 보관 안내](PHOTO_RETENTION.md)를 참고하세요.
 
 ## 2026-11-08 검증 기록
 

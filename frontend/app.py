@@ -16,9 +16,16 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from . import avatar_preview, onboarding_wardrobe, recommendation_ui
+from shared.memory_uploads import MemoryUploadMiddleware
+
+from . import admin, garment_layers, avatar_preview, day_plans, onboarding_wardrobe, recommendation_ui, style_references
 
 app = FastAPI(title="Fitjang Frontend", docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(MemoryUploadMiddleware)
+app.include_router(admin.router)
+app.include_router(garment_layers.router)
 app.include_router(onboarding_wardrobe.router)
 app.include_router(recommendation_ui.router)
+app.include_router(day_plans.router)
+app.include_router(style_references.router)
 app.include_router(avatar_preview.router)

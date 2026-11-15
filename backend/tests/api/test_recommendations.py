@@ -16,7 +16,9 @@ from shared.contracts import Outfit, OutfitItems, RecommendationResult
 
 def recommend(client, account, **values):
     return client.post(
-        "/api/v1/recommendations", headers=account["headers"], json={"temperature_c": 5, **values}
+        "/api/v1/recommendations",
+        headers={**account["headers"], "Idempotency-Key": str(uuid4())},
+        json={"temperature_c": 5, **values},
     )
 
 
@@ -358,7 +360,7 @@ def test_database_failure_rolls_back_all_recommendation_rows(
     def fail():
         nonlocal calls
         calls += 1
-        if calls == 2:  # 첫 커밋은 사용량 기록, 두 번째가 실제 추천 저장입니다.
+        if calls == 3:  # 접수 기록 → 사용량 기록 → 실제 추천 저장 순서입니다.
             raise SQLAlchemyError("recommendation commit failed")
         commit()
 

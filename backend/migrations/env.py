@@ -1,11 +1,12 @@
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import create_engine, pool
+from sqlalchemy import pool
 
 from backend.app.core.config import get_settings
 from backend.app.db import models  # noqa: F401  모든 모델을 로딩해야 autogenerate 가 테이블을 찾습니다
 from backend.app.db.base import Base
+from backend.app.db.engine import create_database_engine as create_engine
 
 config = context.config
 if config.config_file_name is not None:

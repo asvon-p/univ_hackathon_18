@@ -11,7 +11,7 @@ GET  /jobs/{job_id}
 GET  /results/{job_id}.png  → 576x864 PNG
 GET  /health  → {"status": "ok", "gpu", "queued", ...}  (키 없이)
 
-- 옷 한 벌에 약 40초 (RTX 3060 Ti, 2026-11-07 측정). 한 번에 하나씩 처리하고 나머지는 줄을 섬
+- GPU가 측정한 처리시간·공정한 큐 기준의 eta를 상태 응답에 포함합니다.
 - 여러 벌은 결과 사진을 다음 사람 사진으로 넣어 차례로 입힘 (하의 → 상의 → 아우터)
 - 나중에 C의 백엔드가 이 서버를 대신 불러 주면(POST /api/v1/tryon) 이 파일만 고치면 됨
 
@@ -24,6 +24,8 @@ import logging
 import os
 
 import httpx
+
+from shared.tryon_maintenance import read_state
 
 from . import ApiError
 
@@ -56,13 +58,25 @@ async def submit(
     garment: tuple[bytes, str],
     category: str,
     photo_type: str = "auto",
+    *,
+    owner_id: str | None = None,
+    request_id: str | None = None,
+    remaining_categories: tuple[str, ...] = (),
+    preserve_inner: bool = False,
 ) -> dict:
     """착샷 작업 등록 → {"job_id", "status", "queue_position", ...}."""
     files = {
         "person": ("person" + _ext(person[1]), person[0], person[1]),
         "garment": ("garment" + _ext(garment[1]), garment[0], garment[1]),
     }
-    data = {"category": category, "garment_photo_type": photo_type}
+    data = {"category": category, "garment_photo_type": photo_type, "ephemeral": "true"}
+    data["preserve_inner"] = "true" if preserve_inner else "false"
+    if owner_id:
+        data["owner_id"] = owner_id
+    if request_id:
+        data["request_id"] = request_id
+    if remaining_categories:
+        data["remaining_categories"] = ",".join(remaining_categories)
     res = await _send("POST", "/tryon", files=files, data=data)
     return res.json()
 
@@ -75,6 +89,10 @@ async def get_result(job_id: str) -> bytes:
     return (await _send("GET", f"/results/{job_id}.png")).content
 
 
+async def delete_job(job_id: str):
+    await _send("DELETE", f"/jobs/{job_id}")
+
+
 def _ext(content_type: str) -> str:
     return ".png" if content_type == "image/png" else ".jpg"
 
@@ -82,6 +100,10 @@ def _ext(content_type: str) -> str:
 async def _send(method: str, path: str, **kwargs) -> httpx.Response:
     if not enabled():
         raise ApiError(503, "착샷 서버가 설정되지 않았어요. (TRYON_API_URL·KEY)", "TRYON_OFF")
+    state = read_state()
+    # Existing multi-garment jobs may finish while new UI requests are blocked.
+    if method == "POST" and state["phase"] not in ("ready", "draining"):
+        raise ApiError(503, state["message"], "TRYON_PAUSED")
     try:
         async with httpx.AsyncClient(base_url=TRYON_API_URL, timeout=TIMEOUT, trust_env=False) as c:
             res = await c.request(method, path, headers={"x-api-key": TRYON_API_KEY}, **kwargs)

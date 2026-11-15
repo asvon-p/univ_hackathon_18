@@ -1,5 +1,24 @@
 # vision — 팀원 B
 
+## Windows 누끼 복구 (2026-11-14)
+
+`VISION_CLASSIFIER=clip`, `VISION_SEGMENTATION=rembg` 설정은 유지합니다.
+`rembg` 설정의 내부 실행은 이제 `vision/u2net.py`의 ONNX Runtime 직접 추론입니다.
+기존 U²-Net 가중치와 입력 정규화·마스크 복원 방식을 유지하며 `rembg → pymatting → numba`
+의존성을 불러오지 않습니다. Windows 정책·DLL 파일을 수정하지 않습니다.
+
+`vision/requirements.txt`의 ONNX Runtime을 설치하면 됩니다. 모델은 기존
+`.demo/vision-runtime/rembg/models/u2net/u2net.onnx` 또는 기존 flat 경로의 파일을 우선 사용합니다.
+없는 경우에만 공식 rembg GitHub 릴리스에서 다운로드하고 고정 SHA-256을 검증한 뒤 게시합니다.
+`U2NET_HOME`도 지원합니다. 손상된 기존 모델을 임의로 덮어쓰지 않습니다.
+가중치는 Git에 올리지 않으며, 사진 자체는 로컬에서만 추론합니다.
+
+모델 버전은 `vision-baseline-0.3`입니다. 실제 누끼가 실패하면 `analysis_status=failed`로
+반환하여 수동 수정·재분석 경로를 사용할 수 있습니다. 이전 원본·누끼·수정 속성은 보호합니다.
+`flat`/`off` 시연 모드의 동작은 유지합니다.
+
+검증 절차·운영 기록은 [VISION_RECOVERY.md](../docs/VISION_RECOVERY.md)를 참고하세요.
+
 백엔드는 `vision/__init__.py`의 아래 함수만 호출합니다. **이름·인자·반환 타입은 바꾸지 마세요.**
 
 ```python
