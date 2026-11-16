@@ -110,7 +110,7 @@ def test_weather_failure_returns_none_without_caching_or_leaking_location(failur
     weather = engine(respond)
     assert weather.current(37.5665, 126.9780) is None
     assert weather.current(37.5665, 126.9780) is None
-    assert len(calls) == 2
+    assert len(calls) == 1  # Brief failure cooldown prevents repeated upstream requests.
     assert "37.5665" not in caplog.text and "private upstream error" not in caplog.text
 
 
@@ -135,7 +135,9 @@ def test_expired_cache_failure_does_not_return_stale_or_other_location_weather()
         calls.append(request)
         return httpx.Response(200, json=copy.deepcopy(body)) if body else httpx.Response(503)
 
-    weather = engine(respond, WEATHER_CACHE_TTL_SEC=10, WEATHER_CACHE_MAX_ENTRIES=1)
+    weather = engine(
+        respond, WEATHER_CACHE_TTL_SEC=10, WEATHER_CACHE_MAX_ENTRIES=1, WEATHER_STALE_MAX_AGE_SEC=0
+    )
     weather.clock = lambda: tick[0]
     assert weather.current(37, 127).temperature_c == 8.5
     assert weather.current(35, 129).temperature_c == 24.5

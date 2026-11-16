@@ -48,7 +48,9 @@ def test_integrated_frontend_forms_weather_wardrobe_recommendation_feedback(live
         assert "6.5°C" in home.text and "Open-Meteo.com" in home.text
     else:
         assert weather.status_code == 503 and weather.json()["code"] == "WEATHER_UNAVAILABLE"
-        assert "기온을 불러오지 못했어요" in home.text
+        assert "날씨 조회가 지연되고 있어요" in home.text
+        assert 'id="home-weather-retry"' in home.text
+        assert 'href="/recommend?weather_mode=seasonal"' in home.text
     ids = []
     for category in ("top", "bottom", "outerwear"):
         item = next(g for g in CATALOG if g.category == category)

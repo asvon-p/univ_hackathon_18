@@ -32,6 +32,7 @@ def resolve_weather(
     raise AppError(
         503,
         ErrorCode.WEATHER_UNAVAILABLE,
-        "현재 기온을 불러오지 못했습니다. 기온을 직접 입력해 추천을 요청해 주세요.",
-        headers={"Cache-Control": "private, no-store"},
+        "날씨 조회가 지연되고 있어요. 잠시 후 다시 시도하거나 "
+        "기온 직접 입력·계절과 월 선택으로 추천받아 주세요.",
+        headers={"Cache-Control": "private, no-store", "Retry-After": "3"},
     )

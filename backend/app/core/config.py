@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     WEATHER_TIMEOUT_SEC: float = Field(default=3, gt=0, le=10)
     WEATHER_CACHE_TTL_SEC: float = Field(default=300, ge=0, le=900)
     WEATHER_CACHE_MAX_ENTRIES: int = Field(default=256, ge=1, le=4096)
+    WEATHER_STALE_MAX_AGE_SEC: float = Field(default=1800, ge=0, le=7200)
     VISION_TIMEOUT_SEC: float = 20
     RECOMMEND_TIMEOUT_SEC: float = 30
 

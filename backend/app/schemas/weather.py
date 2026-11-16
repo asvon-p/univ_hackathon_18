@@ -18,4 +18,8 @@ class WeatherResponse(BaseModel):
     weather_time: datetime | None = None
     fetched_at: datetime | None = None
     is_fallback: bool = False
+    is_stale: bool = False
+    age_seconds: int | None = None
+    retry_after_sec: int | None = None
+    notice: str | None = None
     attribution: str | None = None

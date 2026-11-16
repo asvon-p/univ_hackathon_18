@@ -74,7 +74,54 @@ def test_weather_failure_requests_manual_input_or_returns_explicit_fallback(api_
     manual = api_client.get(path + "&temperature_c=0", headers=auth_account["headers"])
     assert manual.status_code == 200 and manual.json()["temperature_c"] == 0
     assert manual.json()["source"] == "manual" and manual.json()["is_fallback"]
-    assert len(calls) == 2
+    assert len(calls) == 1  # Recent failed lookup is shared during the retry cooldown.
+
+
+def test_stale_weather_metadata_persists_without_coordinates_and_is_owner_only(
+    api_client,
+    auth_account,
+    account_factory,
+    closet,
+    db_session,
+):
+    tick = [0.0]
+    fail = [False]
+    adapter = OpenMeteoWeather(
+        Settings(_env_file=None, WEATHER_CACHE_TTL_SEC=10),
+        clock=lambda: tick[0],
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(503) if fail[0] else httpx.Response(200, json=response_body(6.5))
+        ),
+    )
+    api_client.app.dependency_overrides[get_weather] = lambda: adapter
+    headers = auth_account["headers"]
+    endpoint = "/api/v1/weather?lat=37&lon=127"
+    fresh = api_client.get(endpoint, headers=headers).json()
+    tick[0], fail[0] = 11, True
+    response = api_client.get(endpoint, headers=headers)
+    assert response.status_code == 200
+    stale = response.json()
+    assert stale["is_stale"] and stale["is_fallback"] and stale["age_seconds"] == 11
+    assert stale["fetched_at"] == fresh["fetched_at"] and stale["notice"]
+    assert api_client.get(endpoint).status_code == 401
+    result = api_client.post(
+        "/api/v1/recommendations",
+        headers=headers,
+        json={"lat": 37, "lon": 127, "user_id": "me", "recent_feedback": []},
+    )
+    assert result.status_code == 201, result.text
+    body = result.json()
+    assert body["weather"]["is_stale"] and body["context"]["temperature_c"] == 6.5
+    stored = db_session.get(Recommendation, UUID(body["recommendation_id"]))
+    assert stored.context["weather"]["is_stale"]
+    assert "latitude" not in str(stored.context) and '"lat"' not in str(stored.context)
+    other = account_factory()
+    assert (
+        api_client.get(
+            f"/api/v1/recommendations/{body['recommendation_id']}", headers=other["headers"]
+        ).status_code
+        == 404
+    )
 
 
 def test_automatic_temperature_reaches_engine_and_postgres_without_coordinates(

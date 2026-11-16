@@ -306,12 +306,21 @@ async def weather(request: Request, lat: float, lon: float):
     try:
         w = await weather_api.get_weather(token, round(lat, 2), round(lon, 2))
     except ApiError as e:
-        return JSONResponse({"detail": e.message, "code": e.code}, status_code=http_status(e))
+        return JSONResponse(
+            {"detail": e.message, "code": e.code, "retry_after_sec": 3},
+            status_code=http_status(e),
+            headers={"Cache-Control": "private, no-store", "Retry-After": "3"},
+        )
     return {
         "temperature_c": w.temperature_c,
         "band": temp_band(w.temperature_c),
         "condition": w.condition,
         "location_name": w.location_name,
+        "is_stale": w.is_stale,
+        "fetched_at": w.fetched_at,
+        "weather_time": w.weather_time,
+        "age_seconds": w.age_seconds,
+        "notice": w.notice,
     }
 
 
@@ -914,7 +923,9 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
       if(!w)w=await fillWeather(37.57,126.98);
       if(generation!==weatherGeneration)return;
       modes.forEach(b=>b.checked=b.value==='temperature');syncWeatherMode();temp.value=w.temperature_c;
-      wStatus.textContent=`${fallback?'서울':(w.location_name||'현재 위치')} 기준`;
+      const place=fallback?'서울':(w.location_name||'현재 위치');
+      wStatus.textContent=w.is_stale?`${place} · ${Math.ceil((w.age_seconds||0)/60)}분 전 확인한 기온이에요. 현재와 다를 수 있어요. 잠시 후 다시 조회해 주세요.`:`${place} 기준`;
+      if(w.fetched_at){const stamp=document.createElement('time');stamp.dateTime=w.fetched_at;stamp.textContent=' · 확인 '+new Date(w.fetched_at).toLocaleTimeString('ko-KR');wStatus.append(stamp);}
     }catch{
       if(generation!==weatherGeneration)return;
       modes.forEach(b=>b.checked=b.value==='seasonal');syncWeatherMode();
@@ -1175,13 +1186,18 @@ HOME_HTML = """{% extends "app_base.html" %}
   <section aria-label="오늘 날씨">
     <p class="date">{{ date_label }}</p>
     {% if weather %}
-    <p class="temp">{{ "%g" | format(weather.temperature_c) }}°C</p>
+    <p class="temp" id="home-temperature">{{ "%g" | format(weather.temperature_c) }}°C</p>
     <p class="wmeta"><span>{{ place }}{% if weather.condition and weather.condition != "Mock" %} · {{ weather.condition }}{% endif %}</span>
       {% if is_fallback %}<button type="button" class="link-btn" id="loc-again">내 위치로</button>{% endif %}</p>
     {% else %}
-    <p class="temp">-°C</p>
-    <p class="wmeta">기온을 불러오지 못했어요.</p>
+    <p class="temp" id="home-temperature">-°C</p>
     {% endif %}
+    <p class="wmeta" id="home-weather-status" role="status">{% if not weather %}날씨 조회가 지연되고 있어요. 다시 시도하거나 계절·월 평균으로 추천받을 수 있어요.{% elif weather.is_stale %}최근 {{ ((weather.age_seconds or 0) / 60) | round(0, 'ceil') | int }}분 전 확인한 기온이에요. 현재와 다를 수 있어요.{% endif %}</p>
+    {% if weather and weather.fetched_at %}<p class="hint" id="home-weather-time">확인 시각 <time datetime="{{ weather.fetched_at }}">{{ weather.fetched_at }}</time></p>{% endif %}
+    <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:10px">
+      <button type="button" class="link-btn" style="min-height:40px" id="home-weather-retry">기온 다시 조회</button>
+      <a class="link-btn" style="display:block;line-height:1.5;padding:8px 0" href="/recommend?weather_mode=seasonal">계절·월 평균으로 추천받기</a>
+    </div>
     {% if weather and not USE_MOCK %}<p class="hint">Weather data by <a href="https://open-meteo.com/" target="_blank" rel="noopener noreferrer">Open-Meteo.com</a></p>{% endif %}
   </section>
 
@@ -1228,6 +1244,27 @@ HOME_HTML = """{% extends "app_base.html" %}
 <script nonce="{{ request.state.csp_nonce | default('') }}">
   // 내 위치 → 쿠키(소수 둘째 자리) → 새로고침하면 서버가 그 위치 기온으로 다시 그림. 거부하면 서울 기준
   (() => {
+    document.querySelectorAll('#home-weather-time time').forEach(el=>{el.textContent=new Date(el.dateTime).toLocaleTimeString('ko-KR');});
+    const retry=document.getElementById('home-weather-retry'), status=document.getElementById('home-weather-status');
+    retry.addEventListener('click',async()=>{
+      retry.disabled=true;status.textContent='기온을 다시 확인하고 있어요…';
+      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),7000);
+      try{
+        let coords=[37.57,126.98];
+        const loc=document.cookie.split('; ').find(v=>v.startsWith('{{ LOC_COOKIE }}='));
+        if(loc){const p=decodeURIComponent(loc.split('=')[1]).split(',').map(Number);if(p.length===2&&p.every(Number.isFinite)&&Math.abs(p[0])<=90&&Math.abs(p[1])<=180)coords=p;}
+        const response=await fetch(`/weather?lat=${coords[0]}&lon=${coords[1]}`,{signal:controller.signal});
+        if(response.status===401){status.textContent='로그인이 만료됐어요. 다시 로그인해 주세요.';return;}
+        if(!response.ok)throw new Error('weather');
+        const data=await response.json();
+        if(!Number.isFinite(data.temperature_c))throw new Error('temperature');
+        document.getElementById('home-temperature').textContent=`${data.temperature_c}°C`;
+        document.getElementById('home-weather-time')?.remove();
+        status.textContent=data.is_stale?`최근 ${Math.ceil((data.age_seconds||0)/60)}분 전 기온이에요. 현재와 다를 수 있어요.`:'기온을 다시 확인했어요.';
+        if(data.fetched_at){const stamp=document.createElement('time');stamp.dateTime=data.fetched_at;stamp.textContent=' · 확인 '+new Date(data.fetched_at).toLocaleTimeString('ko-KR');status.append(stamp);}
+      }catch{document.getElementById('home-temperature').textContent='-°C';document.getElementById('home-weather-time')?.remove();status.textContent='날씨 조회가 지연되고 있어요. 잠시 후 다시 시도하거나 계절·월 평균으로 추천받아 주세요.';}
+      finally{clearTimeout(timer);setTimeout(()=>{retry.disabled=false;},3000);}
+    });
     const save = (v) => { document.cookie = `{{ LOC_COOKIE }}=${v}; path=/; max-age=${60 * 60 * 24 * 7}; samesite=lax`; };
     function ask() {
       if (!window.isSecureContext || !navigator.geolocation) return save("none");

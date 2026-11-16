@@ -1,11 +1,4 @@
-"""연결: 오늘 기온 ↔ C (백엔드가 날씨 API 호출)  (상태: 미완성 · Mock으로 동작)
-
-DECISIONS: 날씨 API 키는 서버 .env(WEATHER_API_KEY)에만 → 날씨는 C의 백엔드가 가져오고, 프론트는 결과만 받음.
-
-GET /weather?lat=37.57&lon=126.98        (Authorization: Bearer)   ← 프론트 제안 (C 확인 필요)
-  200 {"temperature_c": 7.5, "condition": "맑음", "location_name": "서울 중구"}   ← condition·location_name은 없어도 됨
-  위치를 못 받으면 프론트가 서울 좌표로 요청함
-"""
+"""Authenticated backend weather lookup, including explicitly labelled recent readings."""
 
 from __future__ import annotations
 
@@ -23,6 +16,11 @@ class Weather:
     temperature_c: float
     condition: str | None = None
     location_name: str | None = None
+    is_stale: bool = False
+    fetched_at: str | None = None
+    weather_time: str | None = None
+    age_seconds: int | None = None
+    notice: str | None = None
 
 
 async def get_weather(token: str, lat: float, lon: float) -> Weather:
@@ -33,6 +31,11 @@ async def get_weather(token: str, lat: float, lon: float) -> Weather:
         temperature_c=round(float(data["temperature_c"]), 1),
         condition=data.get("condition"),
         location_name=data.get("location_name"),
+        is_stale=data.get("is_stale", False),
+        fetched_at=data.get("fetched_at"),
+        weather_time=data.get("weather_time"),
+        age_seconds=data.get("age_seconds"),
+        notice=data.get("notice"),
     )
 
 
