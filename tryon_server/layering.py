@@ -43,6 +43,9 @@ def _open_panels(generated, labels, hole, projected, left, right, upper, lower):
     t = (ys - upper) / max(1, lower - upper)
     fade = np.minimum(np.clip((t - 0.08) / 0.15, 0, 1), np.clip((0.98 - t) / 0.12, 0, 1))
     fade *= (ys >= values[0, 0]) & (ys <= values[-1, 0])
+    # An observed opening can stop above a coat's hem. Ease the fabric back to
+    # its original position there rather than leave a horizontal seam.
+    fade *= np.clip((values[-1, 0] - ys) / max(8, (lower - upper) * 0.12), 0, 1)
     shift_left = np.clip(actual_left - target_left, 0, span * 0.06) * fade
     shift_right = np.clip(target_right - actual_right, 0, span * 0.06) * fade
     active = (shift_left + shift_right) > 1.5
@@ -112,7 +115,22 @@ def guided_inner_top(before, generated, garment, before_labels, generated_labels
         ]
     opening = Image.new("L", before.size)
     ImageDraw.Draw(opening).polygon(coords, fill=255)
+    # The product's back collar lies above its opening. Bridge that offset only
+    # along the narrow center neckline, never across either front panel.
+    opening_start = min(y for _, y in coords)
+    bridge_end = min(opening_start + 2, upper + (lower - upper) * 0.20)
+    if bridge_end > upper:
+        half = (right - left) * 0.045
+        ImageDraw.Draw(opening).rectangle(
+            (center - half, upper - (lower - upper) * 0.15, center + half, bridge_end), fill=255
+        )
     projected = np.asarray(opening) > 0
+    # Product coordinates are only an approximate 2D correspondence. Let a
+    # continuous observed V-neck follow the rendered plackets, but never let a
+    # color-connected print/hem run across the outer panels.
+    envelope = (np.abs(xx - center) < (right - left) * 0.20) & (
+        (yy >= upper - (lower - upper) * 0.15) & (yy <= opening_lower + 2)
+    )
     hole = projected & (top | generated_clothing)
     contour_found = False
     # Use the user opening as an anchor, then follow the generated jacket boundary.
@@ -159,25 +177,51 @@ def guided_inner_top(before, generated, garment, before_labels, generated_labels
             candidate = components == component
             # Exclude background/parser leakage; retain a confidence-free geometric
             # fallback when fabric colors cannot distinguish the opening.
-            if candidate.sum() < top.sum() * 0.6:
-                hole = candidate | (hole & (yy > lower))
+            if candidate.sum() < top.sum() * 0.6 and (candidate & envelope).any():
+                candidate &= envelope
+                widths = candidate.sum(axis=1)
+                window = max(9, int((lower - upper) * 0.35) | 1)
+                positive = np.flatnonzero(widths)
+                smooth_widths = np.interp(np.arange(len(widths)), positive, widths[positive])
+                typical = np.median(
+                    np.lib.stride_tricks.sliding_window_view(
+                        np.pad(smooth_widths, window // 2, mode="edge"), window
+                    ),
+                    axis=1,
+                )
+                for y in np.flatnonzero(widths):
+                    columns = np.flatnonzero(candidate[y])
+                    midpoint = float(np.median(columns))
+                    if typical[y] > 0:
+                        candidate[y] &= np.abs(np.arange(before.width) - midpoint) <= max(
+                            3, typical[y] * 0.65
+                        )
+                # Do not punch a rectangular opening in solid fabric below the
+                # observed gap. A long coat may close over the trousers there.
+                hole = candidate
                 contour_found = True
+    if not contour_found and not polygon:
+        # No confirmed product opening and no visible rendered gap: solid coat
+        # fabric must occlude the outfit. Never invent a rectangular hole through
+        # a closed/ambiguous long puffer merely to expose the selected shirt.
+        return preserve_unedited_regions(before, generated, before_labels, generated_labels, "tops"), {
+            "status": "approximate",
+            "reason": "opening_unconfirmed",
+            "preserved_pixels": 0,
+            "contour_aligned": False,
+            "panel_adjusted_rows": 0,
+            "opening_bounded": True,
+        }
     adjusted_rows = 0
     if contour_found and polygon:
         generated, generated_labels, hole, adjusted_rows = _open_panels(
-            generated, generated_labels, hole, projected, left, right, upper, lower
+            generated, generated_labels, hole, projected, left, right, upper, opening_lower
         )
         generated_clothing = np.isin(generated_labels, [3, 4])
     if contour_found:
         # A model can tuck its invented inner shirt into new jeans. Retain the
         # selected inner top's existing hem where it is actually exposed, without
         # painting across the generated outer panels or buttons.
-        hole |= (
-            top
-            & np.isin(generated_labels, [5, 6, 7, 16])
-            & (yy > upper + (lower - upper) * 0.72)
-            & (np.abs(xx - center) < (right - left) * 0.30)
-        )
         count, gaps, gap_stats, _ = cv2.connectedComponentsWithStats((~hole).astype("uint8"), 8)
         for component in range(1, count):
             x, y, w, h, area = gap_stats[component]
@@ -189,8 +233,14 @@ def guided_inner_top(before, generated, garment, before_labels, generated_labels
                 and area <= max(9, min(36, before.width * 0.06))
             ):
                 hole[gaps == component] = True
-    protect = np.isin(before_labels, [1, 2, 9, 11, 13])
+    # Hard anatomical boundary after all contour/hem/speckle operations. With no
+    # reliable observed contour, fall back to the narrower product opening.
+    hole &= envelope if contour_found else projected
+    protect = np.isin(before_labels, [1, 2, 9, 11, 13, 15, 17])
     edit = np.isin(before_labels, [3, 4]) | np.isin(generated_labels, [3, 4])
+    # An outer shirt can be shorter than its inner top. Keep the exposed hem
+    # wherever the generator invents trousers/belt instead of outer fabric.
+    edit &= ~(top & np.isin(generated_labels, [5, 6, 7]))
     edit = cv2.dilate(edit.astype("uint8"), np.ones((5, 5), "uint8")).astype(bool) & ~protect
     blend = cv2.GaussianBlur(edit.astype("float32"), (5, 5), 0.8)
     # Feather inward: never leak the inner knit's color over a button/placket edge.
@@ -202,7 +252,6 @@ def guided_inner_top(before, generated, garment, before_labels, generated_labels
     # Product collars sit above the detected opening. For long coats their
     # projected offset is larger; bridge it to the existing neckline so a
     # generated skin/lining band cannot separate the collar from the shirt.
-    opening_start = min(y for _, y in coords)
     neck_end = max(upper + (lower - upper) * 0.04, min(opening_start + 2, upper + (lower - upper) * 0.20))
     # Anchor the neck bridge to the actual narrow opening, not the full top width.
     # The latter erases shirt collars as a rectangular horizontal strip.
@@ -214,7 +263,7 @@ def guided_inner_top(before, generated, garment, before_labels, generated_labels
         if len(neck_x)
         else (right - left) * 0.055
     )
-    neck = (yy < neck_end) & (np.abs(xx - neck_center) < neck_half)
+    neck = (yy < neck_end) & (np.abs(xx - neck_center) < neck_half) & projected
     if contour_found:
         # Observed skin/inner contours already reach the neckline. A geometric
         # bridge is only needed when fabric colors provide no usable contour.
@@ -232,7 +281,37 @@ def guided_inner_top(before, generated, garment, before_labels, generated_labels
         "preserved_pixels": int((restore > 0.99).sum()),
         "contour_aligned": contour_found,
         "panel_adjusted_rows": adjusted_rows,
+        "opening_bounded": True,
     }
+
+
+def preserve_unedited_regions(before, generated, before_labels, generated_labels, category):
+    """A later top must not shorten the already selected trousers.
+
+    New upper-clothing pixels can occlude lower clothing (long coat/long top),
+    while pixels below/outside that silhouette stay exactly from the previous step.
+    """
+    if before.size != generated.size:
+        raise ValueError("Compositing inputs must be aligned")
+    old, new = before_labels, generated_labels
+    if category == "bottoms":
+        edit = np.isin(old, [5, 6, 7, 14]) | np.isin(new, [5, 6, 7, 14])
+        protect = np.isin(old, [1, 2, 3, 9, 11, 12, 13, 15, 17])
+    else:
+        edit = np.isin(old, [3, 4, 10, 12, 16]) | np.isin(new, [3, 4, 10, 12, 16])
+        protect = np.isin(old, [1, 2, 9, 11, 13, 15, 17])
+        # Skin/arms hallucinated over trousers must not erase a completed bottom.
+        edit &= ~np.isin(old, [5, 6, 7, 14]) | np.isin(new, [3, 4])
+    edit = cv2.dilate(edit.astype("uint8"), np.ones((3, 3), "uint8")).astype(bool)
+    edit &= ~protect
+    alpha = cv2.GaussianBlur(edit.astype("float32"), (3, 3), 0.55)
+    alpha[~edit] = 0
+    alpha[protect] = 0
+    base = np.asarray(before.convert("RGB"), dtype="float32")
+    output = np.asarray(generated.convert("RGB"), dtype="float32")
+    return Image.fromarray(
+        np.round(base * (1 - alpha[..., None]) + output * alpha[..., None]).astype("uint8")
+    )
 
 
 def _largest(mask):

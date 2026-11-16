@@ -17,12 +17,15 @@ def test_guided_opening_keeps_top_and_jacket_even_same_color(explicit):
     points = [[0.4, 0], [0.6, 0], [0.65, 1], [0.35, 1]] if explicit else []
     result, status = guided_inner_top(before, generated, coat, labels, labels, points)
     assert status["status"] == ("applied" if explicit else "approximate")
-    assert result.getpixel((100, 140)) == before.getpixel((100, 140))
+    expected = before if explicit else generated
+    assert result.getpixel((100, 140)) == expected.getpixel((100, 140))
+    if not explicit:
+        assert status["reason"] == "opening_unconfirmed"
     assert result.getpixel((50, 140)) == generated.getpixel((50, 140))
     assert result.getpixel((100, 40)) == before.getpixel((100, 40))
 
 
-def test_guided_boundary_removes_invented_inner_hem_and_neck_band():
+def test_guided_boundary_keeps_restoration_inside_opening_and_neckline():
     import numpy as np
     from PIL import ImageDraw
 
@@ -45,7 +48,9 @@ def test_guided_boundary_removes_invented_inner_hem_and_neck_band():
     )
     assert result.getpixel((100, 140)) == before.getpixel((100, 140))
     assert result.getpixel((100, 215)) == before.getpixel((100, 215))
-    assert result.getpixel((60, 215)) == before.getpixel((60, 215))
+    # A connected bright hem may be outer fabric. Color alone cannot widen the
+    # opening and paint the selected inner shirt/trousers across a jacket panel.
+    assert result.getpixel((60, 215)) == generated.getpixel((60, 215))
     assert result.getpixel((100, 70)) == before.getpixel((100, 70))
     assert result.getpixel((50, 140)) == generated.getpixel((50, 140))
 

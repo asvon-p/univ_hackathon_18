@@ -190,6 +190,13 @@ def live_frontend(live_api, tmp_path, request):
     }
     if getattr(request, "param", {}).get("tryon"):
         env.update(TRYON_API_URL="http://127.0.0.1:1", TRYON_API_KEY="test-only-gpu-key")
+    if getattr(request, "param", {}).get("tryon_stub"):
+        env.update(
+            TEST_TRYON_STUB="1",
+            TEST_TRYON_MENTOR="1" if getattr(request, "param", {}).get("mentor") else "0",
+            TEST_TRYON_CALLS=str(tmp_path / "gpu-calls.jsonl"),
+        )
+        runtime["gpu_calls"] = tmp_path / "gpu-calls.jsonl"
     runtime["tryon_maintenance"] = tmp_path / "tryon-maintenance.json"
     with (tmp_path / "frontend.log").open("w", encoding="utf-8") as log:
         process = subprocess.Popen(
@@ -197,7 +204,9 @@ def live_frontend(live_api, tmp_path, request):
                 sys.executable,
                 "-m",
                 "scripts.preview_server",
-                "scripts.mentor_frontend:app"
+                "backend.tests.e2e.tryon_frontend:app"
+                if getattr(request, "param", {}).get("tryon_stub")
+                else "scripts.mentor_frontend:app"
                 if getattr(request, "param", {}).get("mentor")
                 else "frontend.app:app",
                 str(port),

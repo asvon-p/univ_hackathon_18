@@ -95,10 +95,69 @@ def test_gpu_status_uses_measured_queue_estimate(gpu_api):
 @pytest.mark.parametrize("category,expected", [("tops", 202), ("bottoms", 422)])
 def test_outer_preservation_contract_and_future_mode(gpu_api, category, expected):
     client, server = gpu_api
-    response = client.post("/tryon", data={"category": category, "preserve_inner": "true",
-        "remaining_categories": "outerwear", "ephemeral": "true"}, files={
-        "person": ("p.png", picture(), "image/png"), "garment": ("g.png", picture(), "image/png")})
+    response = client.post(
+        "/tryon",
+        data={
+            "category": category,
+            "preserve_inner": "true",
+            "remaining_categories": "outerwear",
+            "ephemeral": "true",
+        },
+        files={"person": ("p.png", picture(), "image/png"), "garment": ("g.png", picture(), "image/png")},
+    )
     assert response.status_code == expected
     if expected == 202:
         job = server.JOBS[response.json()["job_id"]]
         assert job.params["preserve_inner"] is True and job.remaining_categories == ("outerwear",)
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_worker_fit_result_or_length_failure_releases_slot(gpu_api, monkeypatch, tmp_path, mismatch):
+    from PIL import Image
+
+    from tryon_server.garment_length import GarmentLengthError
+
+    client, server = gpu_api
+    owner = uuid4()
+    jid = submit(client, owner).json()["job_id"]
+    (tmp_path / "model.safetensors").write_bytes(b"test-only-placeholder")
+    server.lt.WEIGHTS_DIR = tmp_path
+    server.lt.get_pipeline = lambda: None
+    server.lt.gpu_info = lambda: "test-gpu"
+
+    def infer(*args, **kwargs):
+        if mismatch:
+            raise GarmentLengthError("test length mismatch")
+        return SimpleNamespace(
+            images=[Image.new("RGB", (12, 18))],
+            elapsed_sec=1,
+            garment_photo_type="flat-lay",
+            category="tops",
+            layering=None,
+            fit={"status": "matched", "expected": "long"},
+        )
+
+    server.lt.run_tryon = infer
+    get = server.JOB_QUEUE.get
+    calls = 0
+
+    def once():
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise SystemExit
+        return get()
+
+    monkeypatch.setattr(server.JOB_QUEUE, "get", once)
+    with pytest.raises(SystemExit):
+        server.worker_loop()
+    job = server.JOBS[jid]
+    state = client.get("/jobs/" + jid).json()
+    if mismatch:
+        assert state["status"] == "failed" and state["error_code"] == "GARMENT_LENGTH_MISMATCH"
+        assert state["result_url"] is None and job.result_bytes is None
+    else:
+        assert state["status"] == "done" and state["fit"]["status"] == "matched"
+    assert job.person is job.garment is None and job.done_event.is_set()
+    assert server.RUNNING is None and server.JOB_QUEUE.unfinished_tasks == 0
+    assert submit(client, owner).status_code == 202

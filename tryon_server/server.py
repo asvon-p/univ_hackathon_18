@@ -34,6 +34,7 @@ from shared.tryon_maintenance import read_state
 
 from . import local_tryon as lt
 from .fair_queue import FairJobQueue
+from .garment_length import GarmentLengthError
 from .timing import TimingHistory, forecast
 
 log = logging.getLogger("tryon-api")
@@ -74,6 +75,8 @@ class Job:
     discarded: bool = False
     layering: dict | None = None
     done_event: threading.Event = field(default_factory=threading.Event)
+    fit: dict | None = None
+    error_code: str | None = None
 
     def public(self, request: Request | None = None) -> dict:
         d = {
@@ -88,6 +91,8 @@ class Job:
             "elapsed_sec": self.elapsed_sec,
             "eta": job_eta(self),
             "layering": self.layering,
+            "fit": self.fit,
+            "error_code": self.error_code,
             "category": self.category,
             "garment_photo_type": self.garment_photo_type,
             "params": {k: v for k, v in self.params.items()},
@@ -156,6 +161,7 @@ def worker_loop():
             job.garment_photo_type = res.garment_photo_type
             job.category = res.category
             job.layering = res.layering
+            job.fit = res.fit
             job.status = "done"
             TIMING.record(job.params, time.monotonic() - job.started_mono)
             log.info(
@@ -163,6 +169,7 @@ def worker_loop():
             )
         except Exception as e:  # noqa: BLE001
             job.status = "failed"
+            job.error_code = "GARMENT_LENGTH_MISMATCH" if isinstance(e, GarmentLengthError) else None
             job.error = f"{type(e).__name__}: {str(e)[:300]}"
             log.exception("job %s failed", job.id)
         finally:

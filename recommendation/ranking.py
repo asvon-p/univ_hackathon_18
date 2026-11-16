@@ -1,5 +1,7 @@
+from itertools import product
 from typing import get_args
 
+from recommendation.personalization import feedback_adjustment
 from recommendation.rules import filter_outfits_by_weather, generate_outfits
 from shared.contracts import GarmentAttributes, StyleTag, UserContext
 
@@ -110,6 +112,17 @@ def calculate_color_score(
     return 20
 
 
+def calculate_palette_score(top, bottom, outer=None) -> float:
+    """Primary colors carry 70%; secondary palette carries 30% when supplied."""
+    garments = [g for g in (top, bottom, outer) if g]
+    primary = calculate_color_score(top.color, bottom.color, outer.color if outer else None)
+    if not any(g.secondary_colors for g in garments):
+        return primary
+    palettes = [[g.color, *g.secondary_colors] for g in garments]
+    scores = [calculate_color_score(*colors) for colors in product(*palettes)]
+    return 0.7 * primary + 0.3 * sum(scores) / len(scores)
+
+
 # 상황별로 적합한 패션 스타일
 OCCASION_STYLES = {
     "daily": {"casual", "minimal", "street", "vintage", "amekaji"},
@@ -189,7 +202,7 @@ def score_garment_pair(
     outer: GarmentAttributes | None = None,
 ) -> float:
 
-    return calculate_total_score(
+    base = calculate_total_score(
         top_color=top.color,
         bottom_color=bottom.color,
         top_styles=top.style_candidates,
@@ -199,6 +212,11 @@ def score_garment_pair(
         preferred_styles=context.preferred_styles,
         outer_styles=outer.style_candidates if outer else None,
     )
+    color_delta = calculate_palette_score(top, bottom, outer) - calculate_color_score(
+        top.color, bottom.color, outer.color if outer else None
+    )
+    weight = 0.7 if supported_preferences(context.preferred_styles) else 1.0
+    return round(base + color_delta * weight + feedback_adjustment(context, top, bottom, outer), 2)
 
 
 def score_outfits(outfits: list[dict], garments: list[GarmentAttributes], context: UserContext) -> list[dict]:

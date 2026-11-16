@@ -56,7 +56,10 @@ def restore_source_rgb(cutout, original):
     return result
 
 
-def refined_layer(image, polygon=(), *, opening_mode="legacy"):
+def refined_layer(image, polygon=(), *, opening_mode="legacy", wearing_role=None, garment_type=None):
+    from shared.garment_shape import shape_hints
+
+    hints = shape_hints(image, wearing_role, garment_type)
     rgba = image.convert("RGBA")
     alpha = rgba.getchannel("A")
     # Remove isolated one-pixel noise and feather only the edge, retaining solid fabric.
@@ -87,6 +90,8 @@ def refined_layer(image, polygon=(), *, opening_mode="legacy"):
     metadata = PngImagePlugin.PngInfo()
     metadata.add_text("fitjang_opening", json.dumps(polygon))
     metadata.add_text("fitjang_opening_mode", opening_mode)
+    for name, value in hints.items():
+        metadata.add_text("fitjang_" + name, value)
     output = BytesIO()
     result.save(output, format="PNG", pnginfo=metadata)
     return output.getvalue()

@@ -31,6 +31,7 @@ import uuid
 from typing import Literal
 
 from shared.contracts import GarmentAttributes
+from shared.wardrobes import in_wardrobe
 
 from . import REPO_ROOT, USE_MOCK, ApiError, request, request_bytes
 from .auth_profile import DEMO_EMAIL, mock_email
@@ -48,10 +49,10 @@ class Garment(GarmentAttributes):
     is_example: bool = False
 
 
-async def list_garments(token: str) -> list[Garment]:
+async def list_garments(token: str, wardrobe="all") -> list[Garment]:
     if USE_MOCK:
-        return list(_mock_closet(token))
-    data = await request("GET", "/garments", token=token)
+        return [g for g in _mock_closet(token) if in_wardrobe(g, wardrobe)]
+    data = await request("GET", "/garments", token=token, params={"wardrobe": wardrobe})
     return [Garment(**g) for g in data.get("items", [])]
 
 
@@ -61,11 +62,11 @@ async def get_garment(token: str, garment_id: str) -> Garment:
     return Garment(**await request("GET", f"/garments/{garment_id}", token=token))
 
 
-async def page_garments(token: str, *, category="", status="", q="", cursor="", limit=24):
+async def page_garments(token: str, *, category="", status="", q="", cursor="", limit=24, wardrobe="all"):
     if USE_MOCK:
         from shared.garment_terms import LABELS, search_match
 
-        all_items = list(_mock_closet(token))
+        all_items = [g for g in _mock_closet(token) if in_wardrobe(g, wardrobe)]
         filtered = [g for g in all_items if (not status or g.status == status) and search_match(g, q)]
         items = [g for g in filtered if not category or g.category == category]
         offset = int(cursor or 0)
@@ -80,7 +81,11 @@ async def page_garments(token: str, *, category="", status="", q="", cursor="", 
             "next_cursor": str(offset + limit) if more else None,
         }
     params = {
-        k: v for k, v in dict(category=category, status=status, q=q, cursor=cursor, limit=limit).items() if v
+        k: v
+        for k, v in dict(
+            category=category, status=status, q=q, cursor=cursor, limit=limit, wardrobe=wardrobe
+        ).items()
+        if v
     }
     data = await request("GET", "/garments/page", token=token, params=params)
     data["items"] = [Garment(**g) for g in data["items"]]

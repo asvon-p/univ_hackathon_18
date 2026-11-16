@@ -10,14 +10,19 @@ from backend.app.schemas.garment import GarmentView
 from backend.app.schemas.weather import Temperature, WeatherResponse
 from shared.contracts import Occasion, Outfit, StylePreference, UserContext
 from shared.day_plans import OuterwearPolicy
+from shared.seasonal_weather import Season, seasonal_temperature
+from shared.wardrobes import WardrobeScope
 
 
 class RecommendationRequest(BaseModel):
     """D의 UserContext 직렬화 지원. 실제 사용자·피드백은 항상 서버에서 구성합니다."""
 
     model_config = ConfigDict(extra="forbid")
+    wardrobe: WardrobeScope = "all"
 
     temperature_c: Temperature | None = Field(default=None, examples=[8.5])
+    season: Season | None = None
+    month: int | None = Field(default=None, ge=1, le=12, strict=True)
     lat: float | None = Field(default=None, ge=-90, le=90, allow_inf_nan=False, strict=True)
     lon: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False, strict=True)
     occasion: Occasion | None = None
@@ -37,6 +42,10 @@ class RecommendationRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_temperature_or_location(self):
+        if self.month is not None and self.season is None:
+            raise ValueError("월과 계절을 함께 선택하세요")
+        if self.season is not None:
+            seasonal_temperature(self.season, self.month)
         if (self.reference_id is None) != (self.reference_version is None):
             raise ValueError("참고 사진 ID와 버전을 함께 입력하세요")
         if (self.schedule_id is None) != (self.schedule_version is None):
@@ -47,7 +56,7 @@ class RecommendationRequest(BaseModel):
             raise ValueError("같은 옷을 필수 의류와 제외 의류로 선택할 수 없습니다")
         if (self.lat is None) != (self.lon is None):
             raise ValueError("lat와 lon을 함께 입력하세요")
-        if self.lat is None and self.temperature_c is None:
+        if self.lat is None and self.temperature_c is None and self.season is None:
             raise ValueError("현재 위치(lat/lon) 또는 수동 기온(temperature_c)이 필요합니다")
         return self
 

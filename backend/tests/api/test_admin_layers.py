@@ -109,6 +109,8 @@ def test_opening_keeps_original_and_enforces_owner(
     assert result.getpixel((100, 150))[3] == 0
     assert result.getpixel((50, 150))[3] == 255
     assert "fitjang_opening" in result.info
+    assert result.info["fitjang_wearing_role"] == "outerwear"
+    assert result.info["fitjang_outerwear_length"] == "long"
     assert storage.open(row.original_path).read() == original
     api_client.patch(path, headers=h, json={"category": "top"})
     assert api_client.put(path + "/layer-config", headers=h, json={"points": points}).status_code == 422

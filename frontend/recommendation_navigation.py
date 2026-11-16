@@ -5,6 +5,10 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 RECOMMENDATION_FIELDS = frozenset(
     {
         "temp",
+        "wardrobe",
+        "weather_mode",
+        "season",
+        "month",
         "occasion",
         "styles",
         "style_text",

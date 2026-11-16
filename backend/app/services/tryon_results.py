@@ -13,6 +13,7 @@ from backend.app.services.images import normalize_image, read_upload
 from backend.app.services.storage_cleanup import TryOnCleanupService
 from backend.app.services.user_lock import require_active_user
 from shared.tryon_contract import layering_warnings
+from shared.wardrobes import single_wardrobe
 
 
 def retire_results(db, user_id):
@@ -89,7 +90,7 @@ class TryOnResultService:
             for g in garments
         )
 
-    def create(self, user_id, items):
+    def create(self, user_id, items, *, wardrobe=None):
         require_active_user(self.db, user_id, exclusive=True)
         profile = self.db.get(UserProfile, user_id)
         transient = self.ephemeral(user_id)
@@ -102,13 +103,29 @@ class TryOnResultService:
             )
         if not profile or not profile.body_photo_id or profile.consent_body_info_at is None:
             raise AppError(409, ErrorCode.BODY_PHOTO_NOT_FOUND, "전신 사진을 먼저 올려 주세요")
-        names = []
+        names, garments = [], []
         for slot, gid in items.items():
             garment = self.db.scalar(select(Garment).where(Garment.id == gid, Garment.user_id == user_id))
             # category is the saved wearing role, independent of shape (e.g. outerwear + shirt).
-            if garment is None or garment.attributes.category != slot:
+            if garment is None or garment.attributes is None or garment.attributes.category != slot:
                 raise AppError(404, ErrorCode.NOT_FOUND, "본인 옷장 의류를 선택해 주세요")
             names.append(garment.name or slot)
+            garments.append(garment)
+        # Validate every selected garment before reserving capacity or storing a result.
+        # Ownership is checked first so a foreign ID cannot reveal its wardrobe.
+        selected_wardrobe = single_wardrobe(garments)
+        if selected_wardrobe is None:
+            raise AppError(
+                422,
+                ErrorCode.TRYON_WARDROBE_MIXED,
+                "내 옷장과 테스트용 옷장의 의류를 함께 입힐 수 없어요. 같은 옷장에서 선택해 주세요.",
+            )
+        if wardrobe is not None and wardrobe != selected_wardrobe:
+            raise AppError(
+                422,
+                ErrorCode.TRYON_WARDROBE_MISMATCH,
+                "선택한 옷장과 의류가 일치하지 않아요. 같은 옷장에서 다시 선택해 주세요.",
+            )
         version = profile.body_photo_updated_at
         if version.tzinfo is None:
             version = version.replace(tzinfo=UTC)

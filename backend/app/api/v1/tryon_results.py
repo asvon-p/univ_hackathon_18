@@ -16,6 +16,8 @@ HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosn
 
 class CreateResult(BaseModel):
     items: dict[Literal["top", "bottom", "outerwear"], UUID] = Field(min_length=1, max_length=3)
+    # Older clients may omit this; the service still derives and checks the DB scope.
+    wardrobe: Literal["personal", "example"] | None = None
 
 
 def service(db=Depends(get_db), storage=Depends(get_storage), user=Depends(get_current_user)):
@@ -24,7 +26,7 @@ def service(db=Depends(get_db), storage=Depends(get_storage), user=Depends(get_c
 
 @router.post("", status_code=201)
 def create(body: CreateResult, user=Depends(get_current_user_id), svc=Depends(service)):
-    return svc.create(user, body.items)
+    return svc.create(user, body.items, wardrobe=body.wardrobe)
 
 
 @router.get("")
@@ -63,6 +65,7 @@ def finish(
         "auto-opening-v3.2",
         "open-shirt-v4",
         "open-shirt-v4.1",
+        "occlusion-length-v5",
     ] = Form("legacy"),
     layering_status: Literal["not_requested", "applied", "skipped", "approximate"] = Form("not_requested"),
     user=Depends(get_current_user_id),

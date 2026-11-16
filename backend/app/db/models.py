@@ -36,6 +36,7 @@ class User(UUIDPkMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    starter_wardrobe_provisioned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     photo_policy: Mapped[str] = mapped_column(String(20), default="persistent", server_default="persistent")
     auth_token_version: Mapped[int] = mapped_column(SmallInteger, default=0, server_default="0")
 
@@ -145,6 +146,7 @@ class Garment(UUIDPkMixin, TimestampMixin, Base):
     opening_mode: Mapped[str] = mapped_column(String(12), default="auto", server_default="auto")
     __table_args__ = (
         Index("ix_garments_user_created_id", "user_id", "created_at", "id"),
+        Index("ix_garments_user_wardrobe_page", "user_id", "is_example", "created_at", "id"),
         CheckConstraint("status IN ('available', 'laundry', 'inactive')", name="status_values"),
         CheckConstraint("analysis_status IN ('pending', 'done', 'failed')", name="analysis_status_values"),
         CheckConstraint("wears_before_laundry BETWEEN 1 AND 2", name="wears_before_laundry_range"),
@@ -180,6 +182,9 @@ class GarmentAttribute(Base):
     category: Mapped[str | None] = mapped_column(String(20), index=True)
     subcategory: Mapped[str | None] = mapped_column(String(50))
     color: Mapped[str] = mapped_column(String(20), default="unknown", server_default="unknown")
+    secondary_colors: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), default=list, server_default="[]"
+    )
     pattern: Mapped[str] = mapped_column(String(20), default="unknown", server_default="unknown")
     style_candidates: Mapped[list[str]] = mapped_column(
         JSON().with_variant(ARRAY(String()), "postgresql"), default=list
@@ -340,6 +345,9 @@ class FeedbackEvent(UUIDPkMixin, Base):
         ForeignKey("recommendation_outfits.id", ondelete="SET NULL"), index=True
     )
     accepted: Mapped[bool] = mapped_column(Boolean)
+    reason_codes: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), default=list, server_default="[]"
+    )
     reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True

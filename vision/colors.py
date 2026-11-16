@@ -48,7 +48,7 @@ def _name(rgb, *, denim=False):
     return "pink" if v >= 0.53 else "burgundy"
 
 
-def dominant_color(image: Image.Image, cutout: Image.Image | None, *, denim=False) -> str:
+def _color_votes(image: Image.Image, cutout: Image.Image | None, *, denim=False) -> dict[str, float]:
     source = cutout.copy() if cutout is not None else image.convert("RGBA")
     source.thumbnail((256, 256))
     pixels = np.asarray(source.convert("RGB"))
@@ -60,7 +60,7 @@ def dominant_color(image: Image.Image, cutout: Image.Image | None, *, denim=Fals
         h, w = pixels.shape[:2]
         sample = pixels[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4].reshape(-1, 3)
     if len(sample) < 20:
-        return "unknown"
+        return {}
     # Group chromatic direction independently of brightness: folds/highlights
     # remain part of the same garment color rather than becoming extra colors.
     values = sample.astype(float) / 255
@@ -92,11 +92,28 @@ def dominant_color(image: Image.Image, cutout: Image.Image | None, *, denim=Fals
         rgb = np.median(core if len(core) else cluster, axis=0)
         candidates.append((_name(rgb, denim=denim), share, rgb))
     if not candidates:
-        return "unknown"
+        return {}
     # Adjacent hue bins and shades of one color can vote for the same label.
     votes = {}
     for name, share, _ in candidates:
         votes[name] = votes.get(name, 0) + share
+    return votes
+
+
+def extract_palette(image: Image.Image, cutout: Image.Image | None, *, denim=False) -> tuple[str, list[str]]:
+    votes = _color_votes(image, cutout, denim=denim)
+    ranked = sorted(votes, key=votes.get, reverse=True)
+    if not ranked:
+        return "unknown", []
+    # Ignore small seams and antialiased residuals; users can correct the palette.
+    return ranked[0], [c for c in ranked[1:] if votes[c] >= 0.12][:3]
+
+
+def dominant_color(image: Image.Image, cutout: Image.Image | None, *, denim=False) -> str:
+    """Legacy reference-photo API retains its multi label."""
+    votes = _color_votes(image, cutout, denim=denim)
+    if not votes:
+        return "unknown"
     ranked = sorted(votes, key=votes.get, reverse=True)
     if len(ranked) >= 2 and votes[ranked[0]] < 0.68 and votes[ranked[1]] >= 0.25:
         first, second = ranked[:2]

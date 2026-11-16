@@ -10,6 +10,7 @@ import itertools
 import logging
 import math
 import time
+from heapq import nlargest
 
 from pydantic import ValidationError
 
@@ -71,18 +72,23 @@ class MockRecommender:
         def style_score(*items: GarmentAttributes) -> int:
             return sum(len(prefs & set(g.style_candidates)) for g in items)
 
+        # 피드백이 있으면 조합별 판단이 필요하므로 전체 후보를 순회합니다.
         # 점수가 슬롯별 합이므로 각 슬롯 상위 3개만으로 전체 상위 3개를 만들 수 있습니다.
         # 옷장이 커져도 대체 추천이 모든 조합을 메모리에 쌓지 않습니다.
-        for category in ("top", "bottom"):
-            by_cat[category] = sorted(by_cat[category], key=lambda g: -style_score(g))[:MAX_OUTFITS]
+        if not context.recent_feedback:
+            for category in ("top", "bottom"):
+                by_cat[category] = sorted(by_cat[category], key=lambda g: -style_score(g))[:MAX_OUTFITS]
         outer = required.get("outerwear") or (
             max(by_cat["outerwear"], key=lambda o: o.thermal_level or 0) if need_outer else None
         )
-        combos = []
-        for top, bottom in itertools.product(by_cat["top"], by_cat["bottom"]):
-            items = [g for g in (top, bottom, outer) if g]
-            combos.append((style_score(*items), top, bottom, outer))
-        combos.sort(key=lambda c: -c[0])
+        from recommendation.personalization import feedback_adjustment
+
+        def scored_combinations():
+            for top, bottom in itertools.product(by_cat["top"], by_cat["bottom"]):
+                items = [g for g in (top, bottom, outer) if g]
+                yield (style_score(*items) + feedback_adjustment(context, *items), top, bottom, outer)
+
+        combos = nlargest(MAX_OUTFITS, scored_combinations(), key=lambda c: c[0])
 
         outfits = []
         for i, (score, top, bottom, outer) in enumerate(combos[:MAX_OUTFITS], start=1):

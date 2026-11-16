@@ -24,6 +24,7 @@ def garment_view(garment: Garment) -> GarmentView:
         category=attributes.category,
         subcategory=attributes.subcategory,
         color=attributes.color,
+        secondary_colors=attributes.secondary_colors or [],
         pattern=attributes.pattern,
         style_candidates=attributes.style_candidates,
         thermal_level=attributes.thermal_level,
@@ -90,14 +91,26 @@ def feedback_view(record: FeedbackEvent) -> FeedbackResponse:
         outfit_id=record.outfit_id,
         accepted=record.accepted,
         reason=record.reason,
+        reason_codes=record.reason_codes or [],
         created_at=_utc(record.created_at),
     )
 
 
-def feedback_contract(record: FeedbackEvent) -> FeedbackContract:
+def feedback_contract(record: FeedbackEvent, db=None, user_id=None) -> FeedbackContract:
+    garments = []
+    if db is not None:
+        from backend.app.db.models import RecommendationOutfit
+        from backend.app.repositories.garments import GarmentRepository
+
+        outfit = db.get(RecommendationOutfit, record.outfit_id)
+        if outfit is not None:
+            ids = {gid for gid in (outfit.top_id, outfit.bottom_id, outfit.outerwear_id) if gid}
+            garments = [garment_contract(g) for g in GarmentRepository(db).by_ids(user_id, ids)]
     return FeedbackContract(
         recommendation_id=str(record.recommendation_id),
         outfit_id=str(record.outfit_id),
         accepted=record.accepted,
         reason=record.reason,
+        reason_codes=record.reason_codes or [],
+        garments=garments,
     )

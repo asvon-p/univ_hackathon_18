@@ -13,9 +13,11 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 
 from shared.day_plans import DayPlanSnapshot, OuterwearPolicy, WearingStep
+from shared.feedback import FeedbackCode
+from shared.seasonal_weather import Season
 
 # 필드 추가(기본값 있음) → 1.x 증가 / 이름 변경·삭제·타입 변경 → 2.0 (전원 합의)
-CONTRACT_VERSION = "2.4"
+CONTRACT_VERSION = "2.5"
 
 # ---------- 공통 단어 목록 (A·B·D 모두 이 값만 사용) ----------
 # 값 추가는 가능하지만, 기존 값의 이름 변경·삭제는 전원 합의 후 PR 로만 합니다.
@@ -83,6 +85,7 @@ class GarmentAttributes(BaseModel):
     category: Category | None  # 호환 필드명: 착용 역할. 사용자 선택이 모델 제안보다 우선
     subcategory: str | None = None  # 호환 필드명: 옷 형태. 예: 역할 outerwear + 형태 shirt
     color: Color = "unknown"  # 대표 색상
+    secondary_colors: list[Color] = Field(default_factory=list, max_length=3)
     pattern: Pattern = "unknown"
     style_candidates: list[StyleTag] = Field(default_factory=list)  # 복수 가능
     thermal_level: int | None = None  # 1(얇음)~5(두꺼움), 모르면 None
@@ -136,12 +139,18 @@ class FeedbackEvent(BaseModel):
     outfit_id: str
     accepted: bool
     reason: str | None = None
+    reason_codes: list[FeedbackCode] = Field(default_factory=list, max_length=5)
+    # 서버가 소유권 확인 후 구성하는 비교 대상. HTTP 피드백 입력에서는 허용하지 않습니다.
+    garments: list[GarmentAttributes] = Field(default_factory=list, max_length=3)
 
 
 # ---------- C, D → A ----------
 class UserContext(BaseModel):
+    wardrobe: Literal["all", "personal", "example"] = "all"
     user_id: str
     temperature_c: float
+    season: Season | None = None
+    month: int | None = Field(default=None, ge=1, le=12)
     occasion: Occasion | None = None
     preferred_styles: list[StylePreference] = Field(default_factory=list, max_length=20)
     excluded_items: list[str] = Field(default_factory=list)  # 제외할 garment_id

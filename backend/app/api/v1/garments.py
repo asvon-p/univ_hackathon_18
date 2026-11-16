@@ -12,6 +12,7 @@ from backend.app.schemas.garment import GarmentPage, GarmentPatch, GarmentView
 from backend.app.services.garment import GarmentService
 from backend.app.storage.base import StoragePort
 from shared.contracts import Category, GarmentStatus
+from shared.wardrobes import WardrobeScope
 
 router = APIRouter(prefix="/api/v1/garments", tags=["garments"])
 
@@ -45,17 +46,19 @@ def upload_garment(
 
 @router.get("", response_model=list[GarmentView])
 def list_garments(
+    wardrobe: WardrobeScope = "all",
     category: Category | None = None,
     status: GarmentStatus | None = None,
     user_id: UUID = Depends(get_current_user_id),
     service: GarmentService = Depends(get_garment_service),
 ):
-    return service.list(user_id, category, status)
+    return service.list(user_id, category, status, wardrobe)
 
 
 @router.get("/page", response_model=GarmentPage)
 def paginated_garments(
     response: Response,
+    wardrobe: WardrobeScope = "all",
     category: Category | None = None,
     status: GarmentStatus | None = None,
     q: str = Query(default="", max_length=50),
@@ -67,7 +70,9 @@ def paginated_garments(
     from backend.app.services.garment_page import garment_page
 
     response.headers["Cache-Control"] = "private, no-store"
-    return garment_page(db, user_id, category=category, status=status, q=q, cursor=cursor, limit=limit)
+    return garment_page(
+        db, user_id, category=category, status=status, q=q, cursor=cursor, limit=limit, wardrobe=wardrobe
+    )
 
 
 @router.get("/{garment_id}", response_model=GarmentView)

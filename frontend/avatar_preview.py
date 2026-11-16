@@ -19,7 +19,7 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Form, Request
@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from shared.tryon_contract import RENDER_VERSION, layering_warnings
 from shared.tryon_maintenance import read_state
+from shared.wardrobes import single_wardrobe
 
 from .common import TOKEN_COOKIE, garment_name, register_templates, render
 from .connect import ApiError
@@ -117,6 +118,13 @@ def tryon_items(items) -> dict[str, str]:
     return {s: get(s) or "" for s in ORDER}
 
 
+def tryon_wardrobe(items, by_id) -> str:
+    ids = [gid for gid in tryon_items(items).values() if gid]
+    if not ids or any(gid not in by_id for gid in ids):
+        return "missing"
+    return single_wardrobe(by_id[gid] for gid in ids) or "mixed"
+
+
 def _owner(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()[:20]
 
@@ -195,6 +203,7 @@ async def tryon_start(
     top: Annotated[str, Form()] = "",
     bottom: Annotated[str, Form()] = "",
     outerwear: Annotated[str, Form()] = "",
+    wardrobe: Annotated[Literal["personal", "example"] | None, Form()] = None,
 ):
     """착샷 만들기 시작 (같은 코디·같은 전신 사진이면 하던 것/만든 것을 돌려줌)."""
     token = request.cookies.get(TOKEN_COOKIE)
@@ -214,34 +223,56 @@ async def tryon_start(
 
     items = {"top": top, "bottom": bottom, "outerwear": outerwear}
     key = _key(_profile_owner(token, profile), items, version)
-    if saved := tryon_state(request, items, profile):
-        return saved
-
-    steps, skipped = [], []
+    steps, skipped, garments = [], [], []
     for slot in ORDER:
         if not items[slot]:
             continue
         try:
             g = await closet.get_garment(token, items[slot])
-        except ApiError:
-            continue
+        except ApiError as e:
+            return _json_error(e.status or 502, e.message, code=e.code)
+        if g.category != slot:
+            return _json_error(404, "본인 옷장에서 착용 역할에 맞는 의류를 선택해 주세요.")
+        garments.append(g)
         name = garment_name(g)
         if closet.may_have_photo(g):
             steps.append((slot, g.garment_id, name))
         else:
             skipped.append(name)
+    if garments:
+        selected_wardrobe = single_wardrobe(garments)
+        if selected_wardrobe is None:
+            return _json_error(
+                422,
+                "내 옷장과 테스트용 옷장의 의류를 함께 입힐 수 없어요. 같은 옷장에서 선택해 주세요.",
+                code="TRYON_WARDROBE_MIXED",
+            )
+        if wardrobe is not None and wardrobe != selected_wardrobe:
+            return _json_error(
+                422,
+                "선택한 옷장과 의류가 일치하지 않아요. 같은 옷장에서 다시 선택해 주세요.",
+                code="TRYON_WARDROBE_MISMATCH",
+            )
     if not steps:
         return _json_error(
             422,
             "사진이 있는 옷이 없어서 착샷을 만들 수 없어요. 옷을 사진으로 등록해 주세요.",
         )
 
+    # Validate the full selection before returning a legacy/in-memory cached result,
+    # including clothes without an image that are omitted from the GPU steps.
+    if saved := tryon_state(request, items, profile):
+        return saved
+
     # Recheck after awaited profile/garment requests so a concurrent pause wins.
     if response := maintenance_error():
         return response
     try:
         saved = await api_request(
-            "POST", "/tryon-results", token=token, json={"items": {slot: gid for slot, gid, _ in steps}}
+            "POST",
+            "/tryon-results",
+            token=token,
+            json={"items": {slot: gid for slot, gid, _ in steps}, "wardrobe": selected_wardrobe},
         )
     except ApiError as e:
         return _json_error(
@@ -319,6 +350,13 @@ async def _run(t: TryOn, token: str) -> None:
                     t.finalizing = i == len(t.steps) - 1
                     break
                 if status not in ("queued", "running"):
+                    if job.get("error_code") == "GARMENT_LENGTH_MISMATCH":
+                        raise ApiError(
+                            422,
+                            "선택한 바지의 길이가 착샷에 맞게 반영되지 않았어요. "
+                            "밑단까지 보이는 의류 사진과 전신 사진인지 확인한 뒤 다시 시도해 주세요.",
+                            "GARMENT_LENGTH_MISMATCH",
+                        )
                     # 착샷 서버는 실패를 "failed"로 알려 줌 (그 밖의 모르는 상태도 실패로)
                     log.warning("착샷 서버 작업 실패 %s: %s", job.get("job_id"), job)
                     raise ApiError(
@@ -493,9 +531,17 @@ async def tryon_image(request: Request, tryon_id: str, download: int = 0):
 TRYON_HTML = """{# 코디 카드의 착샷 버튼. items: {"top","bottom","outerwear"} → garment_id, n: 코디 번호 #}
 {% macro tryon_button(items, n, profile, title="") -%}
 {% if TRYON_ON %}
-  {% if profile and profile.body_photo_updated_at %}
   {% set its = tryon_items(items) %}
+  {% set scope = tryon_wardrobe(items, by_id | default({})) %}
+  {% if scope == 'mixed' %}
+  <p class="hint" data-tryon-blocked="mixed">내 옷장과 테스트용 옷장이 섞인 코디는 새 착샷을 만들 수 없어요. 같은 옷장에서 다시 추천받아 주세요.</p>
+  <a class="btn btn-secondary tryon-btn" href="/recommend">옷장 선택하고 다시 추천받기</a>
+  {% elif scope == 'missing' %}
+  <p class="hint" data-tryon-blocked="missing">삭제되었거나 확인할 수 없는 옷이 있어요. 다시 추천받아 주세요.</p>
+  {% elif profile and profile.body_photo_updated_at %}
+  <p class="hint" data-tryon-wardrobe="{{scope}}">{{ '테스트용 옷장' if scope == 'example' else '내 옷장' }}의 의류만 입혀요.</p>
   <button type="button" class="btn btn-secondary tryon-btn" data-tryon="{{ n }}" data-title="{{ title or ('코디 ' ~ n ~ ' 착샷') }}" data-items='{{ its | tojson }}'
+          data-wardrobe="{{scope}}"
           data-state='{{ tryon_state(request, its, profile) | tojson }}'><span class="tb-label">착샷 보기</span></button>
   {% else %}
   <a class="btn btn-secondary tryon-btn" href="/profile/body-photo"><span class="tb-label">전신 사진 올리고 착샷 보기</span></a>
@@ -675,6 +721,7 @@ TRYON_HTML = """{# 코디 카드의 착샷 버튼. items: {"top","bottom","outer
     paint(btn);
     try {
       const items = JSON.parse(btn.dataset.items);
+      items.wardrobe = btn.dataset.wardrobe;
       const res = await fetch("/tryon", { method: "POST", body: new URLSearchParams(items), headers: { Accept: "application/json" } });
       const data = await res.json();
       if (data.login) return (location.href = "/login?next=" + encodeURIComponent(location.pathname + location.search));
@@ -743,6 +790,7 @@ register_templates(
     },
     TRYON_ON=vton.enabled(),
     tryon_state=tryon_state,
+    tryon_wardrobe=tryon_wardrobe,
     tryon_items=tryon_items,
     tryon_service_available=lambda: read_state()["available"],
 )

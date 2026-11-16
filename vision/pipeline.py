@@ -21,7 +21,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from shared.contracts import GarmentAttributes, VisionResult
 from vision.attributes import PROMPTS as ATTRIBUTE_PROMPTS
 from vision.attributes import infer_attributes
-from vision.colors import dominant_color
+from vision.colors import extract_palette
 
 log = logging.getLogger(__name__)
 VERSION = "vision-baseline-0.3"
@@ -238,11 +238,13 @@ def extract(image_path: str, garment_id: str, options: Pipeline | None = None) -
             target = path.parent / "cutout.png"
             cutout.save(target, format="PNG")
             cutout_relative = f"{path.parent.parent.name}/{garment_id}/cutout.png"
+        primary, secondary = extract_palette(image, cutout, denim=denim)
         attrs = GarmentAttributes(
             garment_id=garment_id,
             category=category,
             subcategory=subcategory,
-            color=dominant_color(image, cutout, denim=denim),
+            color=primary,
+            secondary_colors=secondary,
             **inferred,
             cutout_path=cutout_relative,
         )

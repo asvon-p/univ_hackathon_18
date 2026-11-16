@@ -2,6 +2,7 @@
 
 from heapq import nlargest
 
+from recommendation.personalization import feedback_adjustment
 from recommendation.rules import iter_outfits
 from shared.contracts import Outfit, OutfitItems, RecommendationResult
 from shared.day_plans import PURPOSE_LABELS, WearingStep
@@ -22,8 +23,8 @@ PURPOSE_OCCASION = {
 def evaluate(context, top, bottom, outer):
     """Return server-owned explanations, or None for a confirmed hard-style conflict."""
     from recommendation.ranking import (
-        calculate_color_score,
         calculate_occasion_score,
+        calculate_palette_score,
         calculate_style_score,
         supported_preferences,
     )
@@ -134,7 +135,7 @@ def evaluate(context, top, bottom, outer):
     mean = sum(s * w for s, w in zip(scores, weights, strict=True)) / sum(weights)
     worst = min(scores)
     schedule = 0.6 * mean + 0.4 * worst
-    color = calculate_color_score(top.color, bottom.color, outer.color if outer else None) / 40 * 100
+    color = calculate_palette_score(top, bottom, outer) / 40 * 100
     style = (
         calculate_style_score(
             top.style_candidates,
@@ -155,7 +156,8 @@ def evaluate(context, top, bottom, outer):
             "schedule_worst": round(worst, 2),
             "schedule": round(schedule, 2),
             "color_style": round(base, 2),
-            "total": round(total, 2),
+            "feedback": feedback_adjustment(context, top, bottom, outer),
+            "total": round(total + feedback_adjustment(context, top, bottom, outer), 2),
         },
         policy_version=POLICY_VERSION,
     )

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, contains_eager
 
 from backend.app.db.models import Garment, GarmentAttribute
 from shared.contracts import Category, GarmentStatus
+from shared.wardrobes import WardrobeScope
 
 
 class GarmentRepository:
@@ -30,9 +31,15 @@ class GarmentRepository:
         return self.db.scalar(query)
 
     def list(
-        self, user_id: UUID, category: Category | None = None, status: GarmentStatus | None = None
+        self,
+        user_id: UUID,
+        category: Category | None = None,
+        status: GarmentStatus | None = None,
+        wardrobe: WardrobeScope = "all",
     ) -> list[Garment]:
         query = select(Garment).where(Garment.user_id == user_id)
+        if wardrobe != "all":
+            query = query.where(Garment.is_example.is_(wardrobe == "example"))
         if category is not None:
             query = query.join(Garment.attributes).where(GarmentAttribute.category == category)
         if status is not None:
@@ -43,7 +50,9 @@ class GarmentRepository:
         self.db.add(garment)
         self.db.flush()
 
-    def available(self, user_id: UUID, excluded: list[UUID], *, lock: bool = False) -> list[Garment]:
+    def available(
+        self, user_id: UUID, excluded: list[UUID], *, lock: bool = False, wardrobe: WardrobeScope = "all"
+    ) -> list[Garment]:
         query = (
             select(Garment)
             .join(Garment.attributes)
@@ -59,6 +68,8 @@ class GarmentRepository:
         )
         if excluded:
             query = query.where(Garment.id.not_in(excluded))
+        if wardrobe != "all":
+            query = query.where(Garment.is_example.is_(wardrobe == "example"))
         if lock:
             # 분석 속성 변경·세탁 상태 변경·삭제와 저장 직전 검증이 엇갈리지 않게 합니다.
             query = query.with_for_update(of=(Garment, GarmentAttribute))

@@ -20,7 +20,9 @@ def test_signup_immediate_recommendations_with_examples(live_frontend):
     )
     assert signup.status_code == 303
     assert "예시 옷장으로 바로 시작하기" in ui.get(signup.headers["location"]).text
-    page = ui.get("/wardrobe")
+    personal = ui.get("/wardrobe?wardrobe=personal")
+    assert personal.status_code == 200 and 'data-garment-id=' not in personal.text
+    page = ui.get("/wardrobe?wardrobe=example")
     assert page.status_code == 200 and "9벌" in page.text
     assert page.text.count("data-example-badge") == 9 and page.text.count("data-garment-id=") == 9
     h = {"Authorization": "Bearer " + ui.cookies["fitjang_token"]}
@@ -29,5 +31,6 @@ def test_signup_immediate_recommendations_with_examples(live_frontend):
     assert result.status_code == 200 and "코디 1" in result.text
     stored = backend.get("/api/v1/recommendations", headers=h).json()
     assert len(stored) == 1 and stored[0]["outfits"]
+    assert stored[0]["context"]["wardrobe"] == "example"
     assert backend.get("/api/v1/garments", headers=h).json() == before
     assert all(backend.get(g["image_url"], headers=h).status_code == 200 for g in before)

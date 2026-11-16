@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
+from shared.feedback import FeedbackCode
+
 
 class FeedbackRequest(BaseModel):
     """계약 v1.0의 필드를 유지하되 HTTP 입력은 UUID/실제 bool로 제한합니다."""
@@ -13,6 +15,7 @@ class FeedbackRequest(BaseModel):
     outfit_id: UUID
     accepted: StrictBool
     reason: str | None = Field(default=None, max_length=1000)
+    reason_codes: list[FeedbackCode] = Field(default_factory=list, max_length=5)
 
     @field_validator("reason")
     @classmethod
@@ -30,4 +33,5 @@ class FeedbackResponse(BaseModel):
     outfit_id: UUID | None  # 옷 삭제로 코디가 사라져도 피드백 로그는 남습니다.
     accepted: bool
     reason: str | None
+    reason_codes: list[FeedbackCode] = Field(default_factory=list)
     created_at: datetime

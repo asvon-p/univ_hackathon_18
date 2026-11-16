@@ -22,6 +22,7 @@ from backend.app.services.style_references import StyleReferenceService
 from backend.app.services.user_lock import require_active_user
 from backend.app.services.weather import resolve_weather
 from shared.contracts import RECOMMENDATION_CATEGORIES, GarmentAttributes, UserContext
+from shared.seasonal_weather import seasonal_temperature
 
 log = logging.getLogger(__name__)
 
@@ -136,11 +137,16 @@ class RecommendationService:
             if body.reference_id
             else None
         )
-        weather_result = resolve_weather(weather or ManualWeather(), body.lat, body.lon, body.temperature_c)
+        weather_result = resolve_weather(
+            weather or ManualWeather(), body.lat, body.lon, body.temperature_c, body.season, body.month
+        )
         profile = ProfileRepository(self.db).get(user_id)
         context = UserContext(
+            wardrobe=body.wardrobe,
             user_id=str(user_id),
             temperature_c=weather_result.temperature_c,
+            season=body.season,
+            month=(seasonal_temperature(body.season, body.month)[0] if body.season else None),
             occasion=body.occasion,
             preferred_styles=body.preferred_styles or (profile.preferred_styles if profile else []),
             excluded_items=[str(gid) for gid in body.excluded_items],
@@ -153,15 +159,22 @@ class RecommendationService:
             style_reference=reference,
             outerwear_policy=body.outerwear_policy,
             recent_feedback=[
-                feedback_contract(event) for event in FeedbackRepository(self.db).recent(user_id)
+                feedback_contract(event, self.db, user_id)
+                for event in FeedbackRepository(self.db).recent(user_id, wardrobe=body.wardrobe)
             ],
         )
         initial = [
             garment_contract(g)
-            for g in self.garments.available(user_id, body.excluded_items)
+            for g in self.garments.available(user_id, body.excluded_items, wardrobe=body.wardrobe)
             if g.attributes.category in RECOMMENDATION_CATEGORIES
         ]
         self._require_slots(initial)
+        if not set(context.required_garment_ids) <= {g.garment_id for g in initial}:
+            raise AppError(
+                422,
+                ErrorCode.REQUIRED_GARMENT_UNAVAILABLE,
+                "선택한 옷장에 있는 의류만 필수로 선택할 수 있습니다",
+            )
         started = time.perf_counter()
         # 엔진이나 주입된 어댑터가 입력을 변경해도 검증 기준과 저장할 context는 보존합니다.
         outcome = recommender.recommend(
@@ -194,7 +207,9 @@ class RecommendationService:
                         "추천 중 참고 스타일이 변경되거나 삭제되었습니다. 다시 확인해 주세요",
                     ) from None
                 raise
-        current_rows = self.garments.available(user_id, body.excluded_items, lock=True)
+        current_rows = self.garments.available(
+            user_id, body.excluded_items, lock=True, wardrobe=body.wardrobe
+        )
         current = [
             garment_contract(g) for g in current_rows if g.attributes.category in RECOMMENDATION_CATEGORIES
         ]

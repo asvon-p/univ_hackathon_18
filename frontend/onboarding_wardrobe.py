@@ -461,6 +461,7 @@ async def body_photo_image(request: Request):
 @router.get("/wardrobe", response_class=HTMLResponse)
 async def wardrobe(
     request: Request,
+    wardrobe: Literal["personal", "example"] = "personal",
     category: str = "",
     status: str = "",
     q: str = "",
@@ -481,7 +482,9 @@ async def wardrobe(
     status = status if status in LABELS["status"] else ""
     q = " ".join(q.split())[:50]
     try:
-        page = await closet.page_garments(token, category=category, status=status, q=q, cursor=cursor)
+        page = await closet.page_garments(
+            token, category=category, status=status, q=q, cursor=cursor, wardrobe=wardrobe
+        )
     except ApiError as e:
         if partial:
             return JSONResponse(
@@ -494,6 +497,7 @@ async def wardrobe(
         return render(
             request,
             "wardrobe.html",
+            wardrobe=wardrobe,
             status=http_status(e),
             active="wardrobe",
             garments=[],
@@ -504,7 +508,7 @@ async def wardrobe(
             q=q,
             server_error=e.message,
         )
-    next_url = wardrobe_url(category, status, q)
+    next_url = wardrobe_url(category, status, q, wardrobe)
     next_url += (
         ("&" if "?" in next_url else "?") + urlencode({"cursor": page["next_cursor"]})
         if page["next_cursor"]
@@ -520,6 +524,7 @@ async def wardrobe(
     response = render(
         request,
         "wardrobe.html",
+        wardrobe=wardrobe,
         active="wardrobe",
         garments=page["items"],
         total=page["total"],
@@ -536,8 +541,10 @@ async def wardrobe(
     return response
 
 
-def wardrobe_url(category: str = "", status: str = "", q: str = "") -> str:
-    params = {k: v for k, v in (("category", category), ("status", status), ("q", q)) if v}
+def wardrobe_url(category: str = "", status: str = "", q: str = "", wardrobe: str = "personal") -> str:
+    params = {
+        k: v for k, v in (("category", category), ("status", status), ("q", q), ("wardrobe", wardrobe)) if v
+    }
     return "/wardrobe" + (f"?{urlencode(params)}" if params else "")
 
 
@@ -740,6 +747,7 @@ async def garment_form_submit(request: Request, garment_id: str, mode: str):
         str(data.get("thermal_level", "")),
         str(data.get("name", "")),
         str(data.get("location", "")),
+        [str(v) for v in data.getlist("secondary_colors")],
     )
     fields, errors = form.validate()
     try:
@@ -877,10 +885,14 @@ async def garment_delete(request: Request, garment_id: str):
     if not token:
         return go_login(request)
     try:
+        garment = await closet.get_garment(token, garment_id)
         await closet.delete_garment(token, garment_id)
     except ApiError as e:
         return logged_out() if e.status == 401 else garment_error(request, e, "삭제하지 못했어요")
-    return RedirectResponse("/wardrobe?done=deleted", status_code=303)
+    return RedirectResponse(
+        wardrobe_url(wardrobe="example" if garment.is_example else "personal") + "&done=deleted",
+        status_code=303,
+    )
 
 
 @router.get("/garment-images/{garment_id}")
@@ -917,9 +929,11 @@ class GarmentForm:
         thermal_level="",
         name="",
         location="",
+        secondary_colors=(),
     ):
         self.category, self.subcategory = category, subcategory
         self.color, self.pattern = color or "unknown", pattern or "unknown"
+        self.secondary_colors = list(secondary_colors)
         self.styles, self.thermal_level = list(styles), str(thermal_level or "")
         self.name = " ".join((name or "").split())  # 앞뒤·중복 공백 정리
         self.location = " ".join((location or "").split())
@@ -935,6 +949,7 @@ class GarmentForm:
             g.thermal_level or "",
             getattr(g, "name", None) or "",
             getattr(g, "location", None) or "",
+            getattr(g, "secondary_colors", []),
         )
 
     def validate(self) -> tuple[dict, dict[str, str]]:
@@ -949,6 +964,15 @@ class GarmentForm:
             errors["subcategory"] = "옷 형태는 50자까지 쓸 수 있어요."
         if self.color not in LABELS["color"]:
             errors["color"] = "색상을 다시 골라 주세요."
+        if (
+            len(self.secondary_colors) > 3
+            or len(set(self.secondary_colors)) != len(self.secondary_colors)
+            or any(
+                c not in LABELS["color"] or c in ("multi", "unknown", self.color)
+                for c in self.secondary_colors
+            )
+        ):
+            errors["secondary_colors"] = "메인 색상과 겹치지 않는 서브 색상을 최대 3개 골라 주세요."
         if self.pattern not in LABELS["pattern"]:
             errors["pattern"] = "패턴을 다시 골라 주세요."
         if any(s not in LABELS["style"] for s in self.styles):
@@ -967,6 +991,7 @@ class GarmentForm:
             "category": self.category,
             "subcategory": self.subcategory or None,
             "color": self.color,
+            "secondary_colors": self.secondary_colors,
             "pattern": self.pattern,
             "style_candidates": self.styles,
             "thermal_level": thermal,
@@ -1152,7 +1177,7 @@ PROFILE_HTML = """{% extends "app_base.html" %}
   <p class="lead soft">코디 추천에 참고할 정보</p>
   <div class="notice" style="margin-top:20px">
     <p>신체 정보와 전신 사진 없이도 코디 추천을 체험할 수 있어요.</p>
-    <a class="btn btn-secondary" href="/wardrobe">예시 옷장으로 바로 시작하기</a>
+    <a class="btn btn-secondary" href="/wardrobe?wardrobe=example">예시 옷장으로 바로 시작하기</a>
   </div>
   {% else %}
   <h1>프로필</h1>
@@ -1344,7 +1369,7 @@ BODY_PHOTO_HTML = """{% extends "app_base.html" %}
 
 WARDROBE_HTML = """{% extends "app_base.html" %}
 {% from "macros.html" import garment_art, term_guide %}
-{% block title %}내 옷장{% endblock %}
+{% block title %}{{ "테스트용 옷장" if wardrobe == "example" else "내 옷장" }}{% endblock %}
 {% block page_head %}
 <style>
   #wardrobe-more[hidden] { display: none; }
@@ -1419,7 +1444,7 @@ WARDROBE_HTML = """{% extends "app_base.html" %}
 {% if notice %}<div class="notice" role="status" style="margin-bottom:20px">{{ notice }}</div>{% endif %}
 <div class="page-head">
   <div>
-    <h1>내 옷장</h1>
+    <h1>{{ "테스트용 옷장" if wardrobe == "example" else "내 옷장" }}</h1>
     <p class="soft">{{ total }}벌</p>
   </div>
   <a class="btn btn-primary add-btn" href="/garments/new">
@@ -1427,41 +1452,42 @@ WARDROBE_HTML = """{% extends "app_base.html" %}
   </a>
 </div>
 
+<nav class="frow" aria-label="옷장 선택" style="margin:20px 0">
+  <a class="fchip" href="/wardrobe?wardrobe=personal" {% if wardrobe != 'example' %}aria-current="true"{% endif %}>내 옷장</a>
+  <a class="fchip" href="/wardrobe?wardrobe=example" {% if wardrobe == 'example' %}aria-current="true"{% endif %}>테스트용 옷장</a>
+</nav>
+<p class="soft" {% if wardrobe == "example" %}data-starter-notice{% endif %}>{{ "체험용 예시 옷만 모았어요. 내 옷과 섞이지 않고 추천할 수 있어요." if wardrobe == 'example' else "직접 등록한 옷만 보여요. 예시 옷은 테스트용 옷장에서 확인하세요." }}</p>
+{% if total > 0 %}<a class="btn btn-secondary" href="/recommend?wardrobe={{ wardrobe }}">이 옷장으로 코디 추천받기</a>{% endif %}
 {% if server_error %}<div class="alert" role="alert" style="margin-top:20px">{{ server_error }}</div>{% endif %}
 
 {% if total == 0 and not server_error %}
 <section class="empty">
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5a2 2 0 1 1 2 2v1.5"/><path d="M12 8.5 3.4 15.2a1 1 0 0 0 .6 1.8h16a1 1 0 0 0 .6-1.8z"/></svg>
   <h2>아직 등록한 옷이 없어요</h2>
-  <a class="btn btn-primary" href="/garments/new">옷 등록하기</a>
+  <a class="btn btn-primary" href="/garments/new">내 옷 등록하기</a><a class="btn btn-secondary" href="/wardrobe?wardrobe=example">테스트용 옷장 보기</a>
 </section>
 {% elif total > 0 %}
-{% if garments | selectattr('is_example') | list %}
-<div class="notice" style="margin:16px 0" data-starter-notice>
-  <p>체험용 예시 옷이 포함되어 있어요. 내 옷을 추가하고, 예시 옷은 자유롭게 수정·삭제할 수 있어요.</p>
-  <a class="btn btn-secondary" href="/recommend">이 옷으로 코디 추천받기</a>
-</div>
-{% endif %}
-<form class="search" method="get" action="/wardrobe" role="search">
+
+<form class="search" method="get" action="/wardrobe" role="search"><input type="hidden" name="wardrobe" value="{{ wardrobe }}">
   {% if category %}<input type="hidden" name="category" value="{{ category }}">{% endif %}
   {% if status_filter %}<input type="hidden" name="status" value="{{ status_filter }}">{% endif %}
   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
   <input type="search" name="q" value="{{ q }}" placeholder="이름, 니트, 네이비, 위치로 검색" aria-label="옷 검색"
          enterkeyhint="search" autocomplete="off">
-  {% if q %}<a class="clear" href="{{ wardrobe_url(category, status_filter) }}" aria-label="검색어 지우기">×</a>{% endif %}
+  {% if q %}<a class="clear" href="{{ wardrobe_url(category, status_filter, wardrobe=wardrobe) }}" aria-label="검색어 지우기">×</a>{% endif %}
 </form>
 {% if q %}<p class="result-count" role="status">‘<b>{{ q }}</b>’ 검색 결과 {{ all_count }}벌</p>{% endif %}
 <div class="filters">
   <nav class="frow" aria-label="종류">
-    <a class="fchip" href="{{ wardrobe_url('', status_filter, q) }}" {% if not category %}aria-current="true"{% endif %}>전체 <small>{{ all_count }}</small></a>
+    <a class="fchip" href="{{ wardrobe_url('', status_filter, q, wardrobe) }}" {% if not category %}aria-current="true"{% endif %}>전체 <small>{{ all_count }}</small></a>
     {% for c in CATEGORY_ORDER %}
-    <a class="fchip" href="{{ wardrobe_url(c, status_filter, q) }}" {% if category == c %}aria-current="true"{% endif %}>{{ c | ko("category") }} <small>{{ counts[c] }}</small></a>
+    <a class="fchip" href="{{ wardrobe_url(c, status_filter, q, wardrobe) }}" {% if category == c %}aria-current="true"{% endif %}>{{ c | ko("category") }} <small>{{ counts[c] }}</small></a>
     {% endfor %}
   </nav>
   <nav class="frow sub" aria-label="상태">
-    <a class="fchip" href="{{ wardrobe_url(category, '', q) }}" {% if not status_filter %}aria-current="true"{% endif %}>모든 상태</a>
+    <a class="fchip" href="{{ wardrobe_url(category, '', q, wardrobe) }}" {% if not status_filter %}aria-current="true"{% endif %}>모든 상태</a>
     {% for s in ["available", "laundry", "inactive"] %}
-    <a class="fchip" href="{{ wardrobe_url(category, s, q) }}" {% if status_filter == s %}aria-current="true"{% endif %}>{{ s | ko("status") }}</a>
+    <a class="fchip" href="{{ wardrobe_url(category, s, q, wardrobe) }}" {% if status_filter == s %}aria-current="true"{% endif %}>{{ s | ko("status") }}</a>
     {% endfor %}
   </nav>
 </div>
@@ -1478,10 +1504,10 @@ WARDROBE_HTML = """{% extends "app_base.html" %}
 <section class="empty">
   {% if q %}
   <h2>‘{{ q }}’에 맞는 옷이 없어요</h2>
-  <a class="btn btn-secondary" href="/wardrobe">검색·필터 초기화</a>
+  <a class="btn btn-secondary" href="/wardrobe?wardrobe={{ wardrobe }}">검색·필터 초기화</a>
   {% else %}
   <h2>조건에 맞는 옷이 없어요</h2>
-  <a class="btn btn-secondary" href="/wardrobe">필터 초기화</a>
+  <a class="btn btn-secondary" href="/wardrobe?wardrobe={{ wardrobe }}">필터 초기화</a>
   {% endif %}
 </section>
 {% endif %}
@@ -2140,7 +2166,7 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
                  autofocus=errors.name) }}
 
         <fieldset class="field">
-          <legend>색상 <b id="color-name">{{ form.color | ko("color") }}</b></legend>
+          <legend>메인 색상 <b id="color-name">{{ form.color | ko("color") }}</b></legend>
           <div class="swatches">
             {% for c in LABELS["color"] %}
             <label class="swatch" title="{{ c | ko('color') }}">
@@ -2153,6 +2179,17 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
             {% endfor %}
           </div>
           {% if errors.color %}<p class="field-error">{{ errors.color }}</p>{% endif %}
+        </fieldset>
+
+        <fieldset class="field">
+          <legend>서브 색상 <small>선택 · 최대 3개</small></legend>
+          <p class="hint">가장 많이 보이는 색은 메인으로, 무늬·배색은 서브로 골라 주세요.</p>
+          <div class="chips" id="secondary-colors">
+            {% for c in LABELS["color"] if c not in ["multi", "unknown"] %}
+            <label class="chip"><input type="checkbox" name="secondary_colors" value="{{c}}" {% if c in form.secondary_colors %}checked{% endif %}><span>{{c | ko("color")}}</span></label>
+            {% endfor %}
+          </div>
+          {% if errors.secondary_colors %}<p class="field-error" role="alert">{{errors.secondary_colors}}</p>{% endif %}
         </fieldset>
 
         <fieldset class="field">
@@ -2210,6 +2247,16 @@ GARMENT_CONFIRM_HTML = """{% extends "app_base.html" %}
 {% endblock %}
 {% block script %}
 <script nonce="{{ request.state.csp_nonce | default('') }}">
+  const secondary = [...document.querySelectorAll('input[name="secondary_colors"]')];
+  function limitColors(){
+    const primary = document.querySelector('input[name="color"]:checked')?.value;
+    secondary.forEach(b=>{if(b.value===primary)b.checked=false;});
+    const count=secondary.filter(b=>b.checked).length;
+    secondary.forEach(b=>{b.disabled=b.value===primary || (!b.checked && count>=3);b.parentElement.style.opacity=b.disabled?.45:1;});
+  }
+  secondary.forEach(b=>b.addEventListener('change',limitColors));
+  document.querySelectorAll('input[name="color"]').forEach(b=>b.addEventListener('change',limitColors));
+  limitColors();
   // 색상 이름 표시
   document.querySelectorAll("input[name=color]").forEach(r => r.addEventListener("change", () => {
     document.getElementById("color-name").textContent = r.dataset.name;
@@ -2279,7 +2326,7 @@ GARMENT_DETAIL_HTML = """{% extends "app_base.html" %}
 {% block content %}
 
 <div class="detail">
-  <a class="back" href="/wardrobe">← 옷장</a>
+  <a class="back" href="/wardrobe?wardrobe={{ 'example' if g.is_example else 'personal' }}">← 옷장</a>
   {% if notice %}<div class="notice" role="status" style="margin-bottom:16px">{{ notice }}</div>{% endif %}
 
   <div class="layout">
@@ -2291,11 +2338,11 @@ GARMENT_DETAIL_HTML = """{% extends "app_base.html" %}
     <div>
       <p class="kicker">착용 역할: {{ g.category | ko("category") }}{% if g.subcategory %} · 옷 형태: {{ g.subcategory | ko("subcategory") }}{% endif %}</p>
       <h1>{{ garment_name(g) }}</h1>
-      {% if g.is_example %}<p class="notice">가입할 때 제공된 체험용 예시 옷이에요. 자유롭게 수정하거나 삭제할 수 있어요.</p>{% endif %}
+      {% if g.is_example %}<p class="notice">테스트용 옷장에 있는 체험용 예시 옷이에요. 자유롭게 수정하거나 삭제할 수 있어요.</p>{% endif %}
 
       <dl class="props">
         <dt>색상</dt>
-        <dd><span class="dot{% if g.color == 'multi' %} multi{% endif %}" style="background-color: {{ color_hex(g.color) }}"></span>{{ (g.color or "unknown") | ko("color") }}</dd>
+        <dd><span class="dot{% if g.color == 'multi' %} multi{% endif %}" style="background-color: {{ color_hex(g.color) }}"></span>{{ (g.color or "unknown") | ko("color") }}{% if g.secondary_colors %} · 서브: {{g.secondary_colors | map("ko", "color") | join(", ")}}{% endif %}</dd>
         <dt>패턴</dt>
         <dd title="{{ g.pattern | term_description("pattern") }}">{{ g.pattern | ko("pattern") }}</dd>
         <dt>스타일</dt>

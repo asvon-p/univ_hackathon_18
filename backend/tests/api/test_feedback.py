@@ -294,10 +294,11 @@ def test_next_local_recommendation_receives_only_own_recent_feedback(
     api_client.app.dependency_overrides[get_recommender] = lambda: adapter
     response = api_client.post("/api/v1/recommendations", headers=headers, json={"temperature_c": 20})
     assert response.status_code == 201 and response.json()["provider"] == "local"
-    expected = [
-        feedback_body(recommendation, accepted=i % 2 == 0, reason=f"피드백 {i}") for i in range(22, 2, -1)
-    ]
-    assert seen[0]["recent_feedback"] == expected
+    expected = seen[0]["recent_feedback"]
+    assert len(expected) == 1  # Latest opinion for each outfit, not repeated votes.
+    assert expected[0]["reason"] == "피드백 22" and expected[0]["accepted"] is True
+    assert expected[0]["reason_codes"] == []
+    assert {g["garment_id"] for g in expected[0]["garments"]} <= set(closet.values())
     assert response.json()["context"]["recent_feedback"] == expected
     row = db_session.get(Recommendation, UUID(response.json()["recommendation_id"]))
     assert row.context["recent_feedback"] == expected

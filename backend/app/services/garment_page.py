@@ -41,9 +41,9 @@ def search_condition(query):
     )
 
 
-def garment_page(db, user_id, *, category=None, status=None, q="", cursor=None, limit=24):
+def garment_page(db, user_id, *, category=None, status=None, q="", cursor=None, limit=24, wardrobe="all"):
     q = " ".join(q.split())
-    scope = hashlib.sha256(f"{user_id}|{category}|{status}|{q}".encode()).hexdigest()[:24]
+    scope = hashlib.sha256(f"{user_id}|{wardrobe}|{category}|{status}|{q}".encode()).hexdigest()[:24]
     boundary = None
     if cursor:
         try:
@@ -59,6 +59,9 @@ def garment_page(db, user_id, *, category=None, status=None, q="", cursor=None, 
                 422, ErrorCode.VALIDATION_ERROR, "목록 위치가 유효하지 않습니다. 옷장을 새로 열어 주세요."
             ) from None
     conditions = [G.user_id == user_id]
+    if wardrobe != "all":
+        conditions.append(G.is_example.is_(wardrobe == "example"))
+    total = db.scalar(select(func.count()).select_from(G).where(*conditions))
     if status:
         conditions.append(G.status == status)
     if q:
@@ -72,7 +75,6 @@ def garment_page(db, user_id, *, category=None, status=None, q="", cursor=None, 
             .group_by(A.category)
         ).all()
     )
-    total = db.scalar(select(func.count()).select_from(G).where(G.user_id == user_id))
     all_count = sum(counts.values())
     matched = counts.get(category, 0) if category else all_count
     if category:

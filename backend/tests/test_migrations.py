@@ -25,6 +25,27 @@ def require_isolated_migration_schema(db_session):
 
 
 @pytest.mark.skipif(os.environ.get("TEST_POSTGRES") != "1", reason="PostgreSQL migration test")
+def test_wardrobe_partition_migration_preserves_rows_and_marks_prior_examples(db_session, auth_account):
+    connection = db_session.connection()
+    config = Config("backend/alembic.ini")
+    config.attributes["connection"] = connection
+    command.downgrade(config, "0025")
+    connection.execute(
+        text(
+            "INSERT INTO garments (id,user_id,original_path,is_example) VALUES (:id,:user,'legacy.jpg',true)"
+        ),
+        {"id": uuid4(), "user": auth_account["id"]},
+    )
+    before = connection.execute(text("SELECT to_jsonb(g) FROM garments g")).scalar_one()
+    user_before = connection.execute(text("SELECT to_jsonb(u) FROM users u")).scalar_one()
+    command.upgrade(config, "head")
+    assert connection.execute(text("SELECT to_jsonb(g) FROM garments g")).scalar_one() == before
+    user_after = connection.execute(text("SELECT to_jsonb(u) FROM users u")).scalar_one()
+    assert user_after.pop("starter_wardrobe_provisioned") is True
+    assert user_after == user_before
+
+
+@pytest.mark.skipif(os.environ.get("TEST_POSTGRES") != "1", reason="PostgreSQL migration test")
 def test_starter_flag_preserves_all_legacy_garment_values(db_session, auth_account):
     connection = db_session.connection()
     config = Config("backend/alembic.ini")
@@ -284,7 +305,9 @@ def test_reanalysis_migration_protects_legacy_manual_values(db_session):
             .one()
         )
         expected = (
-            ANALYSIS_FIELDS - ({"category"} if category is None else set()) if source == "user" else set()
+            (ANALYSIS_FIELDS - {"secondary_colors"}) - ({"category"} if category is None else set())
+            if source == "user"
+            else set()
         )
         assert set(row["user_edited_fields"]) == expected
         assert row["source"] == source and row["category"] == category

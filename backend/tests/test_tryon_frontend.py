@@ -76,6 +76,24 @@ def test_frontend_displays_gpu_eta_without_fixed_countdown():
     assert item.to_json()["seconds_left"] == 0
 
 
+def test_length_failure_does_not_publish_or_start_remaining_garments(monkeypatch):
+    item = avatar.TryOn("job", "owner", (), [("bottom", "b", "jeans"), ("top", "t", "shirt")], durable=True)
+    monkeypatch.setattr(avatar.auth, "fetch_body_photo", AsyncMock(return_value=(b"person", "image/jpeg")))
+    monkeypatch.setattr("frontend.connect.request_bytes", AsyncMock(return_value=(b"garment", "image/png")))
+    submit = AsyncMock(
+        return_value={"job_id": "gpu", "status": "failed", "error_code": "GARMENT_LENGTH_MISMATCH"}
+    )
+    monkeypatch.setattr(avatar.vton, "submit", submit)
+    monkeypatch.setattr(avatar.vton, "delete_job", AsyncMock())
+    calls = AsyncMock()
+    monkeypatch.setattr(avatar, "api_request", calls)
+    asyncio.run(avatar._run(item, "token"))
+    assert item.status == "error" and "바지의 길이" in item.error
+    assert submit.await_count == 1
+    assert all(c.args[0] != "PUT" for c in calls.call_args_list)
+    assert any(c.args[1].endswith("/cancel") for c in calls.call_args_list)
+
+
 def test_legacy_saved_images_remain_history_but_are_not_reused_for_new_render():
     profile = SimpleNamespace(
         user_id="u",

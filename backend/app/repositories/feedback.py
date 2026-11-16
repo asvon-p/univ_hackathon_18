@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.db.models import FeedbackEvent, Recommendation, RecommendationOutfit, User
+from shared.wardrobes import WardrobeScope
 
 
 class FeedbackRepository:
@@ -46,16 +47,33 @@ class FeedbackRepository:
         )
         return list(self.db.scalars(query.execution_options(populate_existing=True)))
 
-    def recent(self, user_id: UUID) -> list[FeedbackEvent]:
-        # 삭제/익명화된 기록을 제외하고 실제 소유 추천·코디의 최근 20건만 A에 전달합니다.
+    def recent(self, user_id: UUID, *, wardrobe: WardrobeScope = "all") -> list[FeedbackEvent]:
+        # Scope comes from the owned recommendation, never from submitted feedback.
+        # Unscoped legacy records remain available only to legacy/all recommendations.
+        latest = (
+            select(
+                FeedbackEvent.id,
+                func.row_number()
+                .over(
+                    partition_by=FeedbackEvent.outfit_id,
+                    order_by=(FeedbackEvent.created_at.desc(), FeedbackEvent.id.desc()),
+                )
+                .label("position"),
+            )
+            .where(FeedbackEvent.user_id == user_id)
+            .subquery()
+        )
         query = (
             select(FeedbackEvent)
+            .join(latest, latest.c.id == FeedbackEvent.id)
             .join(Recommendation, FeedbackEvent.recommendation_id == Recommendation.id)
             .join(RecommendationOutfit, FeedbackEvent.outfit_id == RecommendationOutfit.id)
             .where(
                 FeedbackEvent.user_id == user_id,
+                latest.c.position == 1,
                 Recommendation.user_id == user_id,
                 RecommendationOutfit.recommendation_id == Recommendation.id,
+                func.coalesce(Recommendation.context["wardrobe"].as_string(), "all") == wardrobe,
             )
             .order_by(FeedbackEvent.created_at.desc(), FeedbackEvent.id.desc())
             .limit(20)

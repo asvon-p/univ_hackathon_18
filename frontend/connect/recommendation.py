@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from shared.contracts import FeedbackEvent, ReferenceMatch, UserContext
 from shared.day_plans import WearingStep
 from shared.recommendation_constraints import required_by_category
+from shared.wardrobes import in_wardrobe
 
 from . import USE_MOCK, ApiError, request
 from .garment_storage import Garment, mock_closet
@@ -98,20 +99,39 @@ async def recent_results(token: str) -> list[RecommendationResult]:
     return [RecommendationResult(**row) for row in data["items"]]
 
 
+async def feedback_states(token: str, recommendation_id: str) -> dict:
+    if USE_MOCK:
+        events = [
+            e.model_dump()
+            for owner, e in reversed(_MOCK_FEEDBACK)
+            if owner == token and e.recommendation_id == recommendation_id
+        ]
+    else:
+        events = await request(
+            "GET", f"/recommendations/{recommendation_id}/feedback", token=token, params={"limit": 100}
+        )
+    if isinstance(events, dict):
+        events = events.get("items", [])
+    latest = {}
+    for event in events:
+        latest.setdefault(event["outfit_id"], event)
+    return latest
+
+
 async def send_feedback(token: str, event: FeedbackEvent) -> None:
     if USE_MOCK:
-        _MOCK_FEEDBACK.append(event)
+        _MOCK_FEEDBACK.append((token, event))
         return
     await request(
         "POST",
         f"/recommendations/{event.recommendation_id}/feedback",
         token=token,
-        json=event.model_dump(),
+        json=event.model_dump(exclude={"garments"}),
     )
 
 
 # ---- Mock: 입을 수 있는 옷으로 단순 조합 (A의 실제 추천 규칙·LLM과 무관) -----------
-_MOCK_FEEDBACK: list[FeedbackEvent] = []
+_MOCK_FEEDBACK: list[tuple[str, FeedbackEvent]] = []
 _MOCK_RESULTS: dict[tuple[str, str], RecommendationResult] = {}
 _MOCK_REQUESTS: dict[tuple[str, str], str] = {}
 
@@ -121,7 +141,9 @@ async def _mock_recommend(token: str, context: UserContext) -> RecommendationRes
     usable = [
         g
         for g in mock_closet(token)
-        if g.status == "available" and g.garment_id not in context.excluded_items
+        if g.status == "available"
+        and g.garment_id not in context.excluded_items
+        and in_wardrobe(g, context.wardrobe)
     ]
     by_cat = {c: [g.garment_id for g in usable if g.category == c] for c in ("top", "bottom", "outerwear")}
     try:

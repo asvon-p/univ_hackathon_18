@@ -30,6 +30,8 @@ except Exception:  # noqa: BLE001
 
 from PIL import Image
 
+from tryon_server.garment_length import GarmentLengthError
+
 ROOT = Path(__file__).resolve().parent
 REPO_DIR = ROOT / "fashn-vton-1.5"
 WEIGHTS_DIR = Path(os.getenv("FASHN_WEIGHTS_DIR", REPO_DIR / "weights"))
@@ -111,6 +113,7 @@ class LocalResult:
     category: str = ""
     garment_photo_type: str = ""
     layering: dict | None = None
+    fit: dict | None = None
 
 
 def run_tryon(
@@ -154,6 +157,11 @@ def run_tryon(
     except (ValueError, TypeError):
         opening_polygon = []
     opening_mode = garment.info.get("fitjang_opening_mode", "legacy")
+    is_outer = preserve_inner or garment.info.get("fitjang_wearing_role") == "outerwear"
+    outer_length = garment.info.get("fitjang_outerwear_length", "regular")
+    bottom_length = garment.info.get("fitjang_bottom_length", "unknown")
+    if bottom_length not in ("long", "short"):
+        bottom_length = "unknown"
     garment_rgba = garment.convert("RGBA")
     background = Image.new("RGB", garment.size, "white")
     background.paste(garment_rgba, mask=garment_rgba.getchannel("A"))
@@ -165,42 +173,78 @@ def run_tryon(
     if pipe.device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
     t0 = time.time()
-    out = pipe(
+    # A long coat covers the lower body too. The upper-only inpainting mask
+    # explicitly protects bare legs, so use full-body garment coverage here.
+    inference_category = "one-pieces" if is_outer and outer_length == "long" else category
+    # Remove the old shorts/printed shirt instead of allowing them to condition
+    # the new garment. Composite the selected inner outfit back afterwards.
+    masked = category == "bottoms" or is_outer
+    arguments = dict(
         person_image=person,
         garment_image=garment,
-        category=category,
+        category=inference_category,
         garment_photo_type=garment_photo_type,
         num_samples=int(num_samples),
         num_timesteps=int(num_timesteps),
         guidance_scale=float(guidance_scale),
         seed=int(seed),
-        segmentation_free=bool(segmentation_free),
+        segmentation_free=False if masked else bool(segmentation_free),
     )
+    out = pipe(**arguments)
     images = list(out.images)
+    from tryon_server.garment_length import check_bottom_length
+    from tryon_server.layering import preserve_unedited_regions
+
+    # The pipeline resizes/unpads its output. Use matching coordinates for every
+    # stage, including the first full-resolution uploaded person photo.
+    before = person.resize(images[0].size, Image.Resampling.LANCZOS)
+    before_labels = pipe.hp_model.predict(before)
+    fit = None
+    if category == "bottoms" and bottom_length != "unknown":
+        import numpy as np
+
+        pose = pipe.pose_model(np.asarray(before)[..., ::-1])
+        for attempt in range(2):
+            checks = [check_bottom_length(pipe.hp_model.predict(im), pose, bottom_length) for im in images]
+            if all(check["status"] != "mismatch" for check in checks):
+                fit = {**checks[0], "retried": bool(attempt)}
+                break
+            if attempt:
+                raise GarmentLengthError("Selected trouser length was not reproduced after masked retry")
+            # One bounded retry only; avoid publishing shorts as long trousers.
+            images = list(
+                pipe(
+                    **{
+                        **arguments,
+                        "seed": int(seed) + 1,
+                        "num_timesteps": min(50, int(num_timesteps) + 10),
+                        "guidance_scale": max(2.0, float(guidance_scale)),
+                    }
+                ).images
+            )
     layering = None
-    if preserve_inner and opening_mode == "off":
+    if is_outer and opening_mode == "off":
         layering = {"status": "not_requested", "reason": "opening_disabled", "preserved_pixels": 0}
-    if preserve_inner and opening_mode != "off":
+    if is_outer and opening_mode != "off":
         from tryon_server.layering import guided_inner_top, preserve_inner_top
 
         # Keep all masks/images in RAM. The parser identifies clothing regions,
         # not people; it creates no identity template or training example.
-        before_labels = pipe.hp_model.predict(person)
         garment_labels = pipe.hp_model.predict(garment)
         restored = []
         for generated in images:
             generated_labels = pipe.hp_model.predict(generated)
             image, layering = preserve_inner_top(
-                person,
+                before,
                 generated,
                 garment,
                 before_labels,
                 generated_labels,
                 garment_labels,
             )
-            if opening_polygon or layering["status"] == "skipped":
+            if opening_polygon or outer_length == "long" or layering["status"] == "skipped":
                 image, layering = guided_inner_top(
-                    person,
+                    before,
                     generated,
                     garment_rgba,
                     before_labels,
@@ -211,6 +255,13 @@ def run_tryon(
                     layering["reason"] = "automatic_opening"
             restored.append(image)
         images = restored
+    else:
+        images = [
+            preserve_unedited_regions(
+                before, generated, before_labels, pipe.hp_model.predict(generated), category
+            )
+            for generated in images
+        ]
     elapsed = time.time() - t0
     peak = torch.cuda.max_memory_allocated() / 1024**3 if pipe.device.type == "cuda" else None
 
@@ -230,4 +281,5 @@ def run_tryon(
         category=category,
         garment_photo_type=garment_photo_type,
         layering=layering,
+        fit=fit,
     )

@@ -14,7 +14,7 @@ class WeatherResponse(BaseModel):
     temperature_c: Temperature
     condition: str | None = None
     location_name: str | None = None
-    source: Literal["open_meteo", "manual"]
+    source: Literal["open_meteo", "manual", "seasonal"]
     weather_time: datetime | None = None
     fetched_at: datetime | None = None
     is_fallback: bool = False

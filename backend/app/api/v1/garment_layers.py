@@ -110,7 +110,13 @@ def resolve_opening(row, image):
 def layer_bytes(row, storage):
     image = load_cutout(row, storage)
     opening = resolve_opening(row, image)
-    return refined_layer(image, opening["points"], opening_mode=opening["source"])
+    return refined_layer(
+        image,
+        opening["points"],
+        opening_mode=opening["source"],
+        wearing_role=row.attributes.category,
+        garment_type=row.attributes.subcategory,
+    )
 
 
 @router.get("/{gid}/layer-image")

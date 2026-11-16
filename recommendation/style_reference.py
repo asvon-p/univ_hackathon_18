@@ -3,9 +3,10 @@
 from heapq import nlargest
 
 from recommendation.day_schedule import evaluate as evaluate_day
+from recommendation.personalization import feedback_adjustment
 from recommendation.ranking import (
-    calculate_color_score,
     calculate_occasion_score,
+    calculate_palette_score,
     calculate_style_score,
     supported_preferences,
 )
@@ -38,7 +39,10 @@ def compare(feature, garment, focus, required):
     if feature.color != "unknown":
         equal = feature.color == garment.color
         close = any(feature.color in group and garment.color in group for group in COLOR_GROUPS)
-        terms.append((weights[0], 1 if equal else (0.5 if close else 0)))
+        secondary = feature.color in garment.secondary_colors
+        terms.append((weights[0], 1 if equal else (0.7 if secondary else (0.5 if close else 0))))
+        if secondary and not equal:
+            matched.append(f"서브 색상 {feature.color}")
         (matched if equal else different).append(
             f"색상 {feature.color}"
             if equal
@@ -84,7 +88,7 @@ def evaluate(context, top, bottom, outer):
         for f in reference.features
     ]
     reference_score = sum(score for score, _ in comparisons) / len(comparisons)
-    color = calculate_color_score(top.color, bottom.color, outer.color if outer else None) / 40 * 100
+    color = calculate_palette_score(top, bottom, outer) / 40 * 100
     preference = (
         calculate_style_score(
             top.style_candidates,
@@ -130,7 +134,8 @@ def evaluate(context, top, bottom, outer):
         "color": round(color, 2),
         "occasion": round(occasion, 2),
         "preference": round(preference, 2),
-        "total": round(total, 2),
+        "feedback": feedback_adjustment(context, top, bottom, outer),
+        "total": round(total + feedback_adjustment(context, top, bottom, outer), 2),
     }
     return {
         "wearing_plan": day["wearing_plan"] if day else [],

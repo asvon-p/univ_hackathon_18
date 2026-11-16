@@ -97,10 +97,8 @@ def test_preserve_conditions_across_schedule_management(live_frontend):
     restored = ui.get(selected)
     assert restored.status_code == 200
     assert 'value="-2.5"' in restored.text and 'name="occasion" value="date" checked' in restored.text
-    assert (
-        'name="styles" value="casual" checked' in restored.text
-        and 'name="styles" value="minimal" checked' in restored.text
-    )
+    for style in ("casual", "minimal"):
+        assert re.search(rf'<input\b[^>]*name="styles"[^>]*value="{style}"[^>]*\bchecked\b', restored.text)
     assert f'value="{ref["id"]}" data-version="2" selected' in restored.text
     for gid in (ids[0], ids[-1]):
         assert f'value="{gid}" selected' in restored.text

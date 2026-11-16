@@ -21,6 +21,7 @@ from backend.app.services.thumbnails import create_thumbnail, source_key, thumbn
 from backend.app.services.user_lock import require_active_user
 from backend.app.storage.base import InvalidStorageKey, StoragePort
 from shared.contracts import Category, GarmentStatus
+from shared.wardrobes import WardrobeScope
 
 log = logging.getLogger(__name__)
 
@@ -38,9 +39,13 @@ class GarmentService:
         return garment
 
     def list(
-        self, user_id: UUID, category: Category | None = None, status: GarmentStatus | None = None
+        self,
+        user_id: UUID,
+        category: Category | None = None,
+        status: GarmentStatus | None = None,
+        wardrobe: WardrobeScope = "all",
     ) -> list[GarmentView]:
-        return [garment_view(g) for g in self.repository.list(user_id, category, status)]
+        return [garment_view(g) for g in self.repository.list(user_id, category, status, wardrobe)]
 
     def get(self, user_id: UUID, garment_id: UUID) -> GarmentView:
         return garment_view(self._owned(user_id, garment_id))
@@ -120,9 +125,14 @@ class GarmentService:
                     result.attributes.model_dump(exclude={"garment_id", "cutout_path", "status"})
                 )
                 protected = set(attributes.user_edited_fields)
+                if protected & {"color", "secondary_colors"}:
+                    protected |= {"color", "secondary_colors"}
                 for field, value in values.model_dump(exclude_unset=True).items():
                     if field not in protected:
                         setattr(attributes, field, value)
+                attributes.secondary_colors = [
+                    c for c in (attributes.secondary_colors or []) if c != attributes.color
+                ]
                 attributes.source = "user" if protected else "model"
                 garment.analysis_status = "done"
                 attributes.error = None
@@ -183,6 +193,14 @@ class GarmentService:
         require_active_user(self.db, user_id)
         garment = self._owned(user_id, garment_id, lock=True)
         values = patch.model_dump(exclude_unset=True)
+        primary = values.get("color", garment.attributes.color)
+        secondary = values.get("secondary_colors", garment.attributes.secondary_colors)
+        if primary in secondary:
+            if "secondary_colors" in values:
+                raise AppError(
+                    422, ErrorCode.VALIDATION_ERROR, "메인 색상과 서브 색상을 중복 선택할 수 없습니다"
+                )
+            values["secondary_colors"] = [c for c in secondary if c != primary]
         if values.get("status") == "available" and garment.status == "laundry":
             garment.wear_count = 0
         for field in ("status", "name", "location", "wears_before_laundry"):

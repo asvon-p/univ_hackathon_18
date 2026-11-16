@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -32,6 +33,8 @@ class FeedbackService:
                 outfit_id=body.outfit_id,
                 accepted=body.accepted,
                 reason=body.reason,
+                reason_codes=list(dict.fromkeys(body.reason_codes)),
+                created_at=datetime.now(UTC),
             )
             self.feedback.add(record)
             response = feedback_view(record)

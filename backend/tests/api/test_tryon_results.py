@@ -55,7 +55,7 @@ def test_edited_garment_invalidates_reuse_without_deleting_saved_result(
 
 
 @pytest.mark.parametrize("policy", ["persistent", "session"])
-@pytest.mark.parametrize("version", ["open-shirt-v4", "open-shirt-v4.1"])
+@pytest.mark.parametrize("version", ["open-shirt-v4", "open-shirt-v4.1", "occlusion-length-v5"])
 def test_layering_metadata_warnings_and_ownership(
     api_client, auth_account, db_session, account_factory, policy, version
 ):

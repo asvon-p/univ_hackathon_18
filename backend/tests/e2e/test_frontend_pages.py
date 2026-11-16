@@ -7,8 +7,9 @@ from uuid import uuid4
 import httpx
 import pytest
 from PIL import Image
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
+from backend.app.db.engine import create_database_engine as create_engine
 from backend.tests.e2e.recommendation_flow import submit_recommendation
 from scripts.demo_assets import CATALOG, garment_images
 

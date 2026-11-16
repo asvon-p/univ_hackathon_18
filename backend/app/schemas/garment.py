@@ -16,6 +16,7 @@ class GarmentView(BaseModel):
     category: Category | None = None
     subcategory: str | None = None
     color: Color = "unknown"
+    secondary_colors: list[Color] = Field(default_factory=list, max_length=3)
     pattern: Pattern = "unknown"
     style_candidates: list[StyleTag] = Field(default_factory=list)
     thermal_level: int | None = None
@@ -65,17 +66,33 @@ class GarmentPatch(BaseModel):
         default=None, max_length=50, validation_alias=AliasChoices("garment_type", "subcategory")
     )
     color: Color | None = None
+    secondary_colors: list[Color] | None = Field(default=None, max_length=3)
     pattern: Pattern | None = None
     style_candidates: list[StyleTag] | None = None
     thermal_level: int | None = Field(default=None, ge=1, le=5)
     status: GarmentStatus | None = None
     wears_before_laundry: int | None = Field(default=None, strict=True, ge=1, le=2)
 
-    @field_validator("category", "color", "pattern", "style_candidates", "status", "wears_before_laundry")
+    @field_validator(
+        "category",
+        "color",
+        "secondary_colors",
+        "pattern",
+        "style_candidates",
+        "status",
+        "wears_before_laundry",
+    )
     @classmethod
     def _non_null_when_supplied(cls, value):
         if value is None:
             raise ValueError("이 필드는 null로 변경할 수 없습니다")
+        return value
+
+    @field_validator("secondary_colors")
+    @classmethod
+    def validate_palette(cls, value):
+        if len(set(value)) != len(value) or set(value) & {"multi", "unknown"}:
+            raise ValueError("서브 색상은 중복 없이 실제 색상으로 최대 3개 선택하세요")
         return value
 
 

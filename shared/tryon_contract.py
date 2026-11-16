@@ -1,12 +1,12 @@
 """Shared render metadata; legacy results remain accessible in the owner's history."""
 
-RENDER_VERSION = "open-shirt-v4.1"
+RENDER_VERSION = "occlusion-length-v5"
 
 
 def layering_warnings(status):
     if status == "approximate":
         return [
-            "앞여밈 위치를 추정해 상의를 보존했습니다. "
+            "아우터의 열린 경계를 정확히 확인하지 못해 안쪽 옷이 더 가려질 수 있습니다. "
             "옷 상세의 ‘누끼 정제·아우터 안쪽 설정’에서 실제 열린 영역을 지정해 주세요."
         ]
 

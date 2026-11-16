@@ -4,9 +4,9 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from backend.app.db.engine import create_database_engine as create_engine
 from backend.tests.api.test_garment_pagination import seed
 
 
