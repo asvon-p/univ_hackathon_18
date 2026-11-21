@@ -38,6 +38,7 @@ def test_tryon_result_requires_live_owner_and_current_photo(monkeypatch, state):
 
 @pytest.mark.parametrize("outer_shape", ["jacket", "shirt", "cardigan"])
 def test_sequential_bottom_top_outerwear_uses_previous_result(monkeypatch, outer_shape):
+    assert tuple(avatar.ORDER) == ("bottom", "top", "outerwear")
     item = avatar.TryOn(
         "job", "owner", (), [(s, s, outer_shape if s == "outerwear" else s) for s in avatar.ORDER]
     )
@@ -100,6 +101,8 @@ def test_legacy_saved_images_remain_history_but_are_not_reused_for_new_render():
         body_photo_updated_at="v1",
         saved_tryons=[{"id": "old", "status": "done", "items": {"top": "t"}, "photo_version": "v1"}],
     )
+    assert avatar.tryon_state(request("token"), {"top": "t"}, profile) is None
+    profile.saved_tryons[0]["render_version"] = "occlusion-length-v5"
     assert avatar.tryon_state(request("token"), {"top": "t"}, profile) is None
     assert profile.saved_tryons[0]["id"] == "old"
     profile.saved_tryons[0]["render_version"] = avatar.RENDER_VERSION

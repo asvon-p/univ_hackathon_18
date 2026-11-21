@@ -66,6 +66,7 @@ def finish(
         "open-shirt-v4",
         "open-shirt-v4.1",
         "occlusion-length-v5",
+        "ankle-layers-v6",
     ] = Form("legacy"),
     layering_status: Literal["not_requested", "applied", "skipped", "approximate"] = Form("not_requested"),
     user=Depends(get_current_user_id),

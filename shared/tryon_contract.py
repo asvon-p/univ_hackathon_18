@@ -1,6 +1,8 @@
 """Shared render metadata; legacy results remain accessible in the owner's history."""
 
-RENDER_VERSION = "occlusion-length-v5"
+RENDER_VERSION = "ankle-layers-v6"
+# Every stage receives the previous stage's result, never the original photo.
+WEARING_ORDER = ("bottom", "top", "outerwear")
 
 
 def layering_warnings(status):

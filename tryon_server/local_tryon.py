@@ -178,15 +178,18 @@ def run_tryon(
     inference_category = "one-pieces" if is_outer and outer_length == "long" else category
     # Remove the old shorts/printed shirt instead of allowing them to condition
     # the new garment. Composite the selected inner outfit back afterwards.
-    masked = category == "bottoms" or is_outer
+    # Mask the original printed shirt as well. Order alone cannot stop its
+    # graphics from leaking into a newly selected plain top/outer layer.
+    masked = category in ("bottoms", "tops") or is_outer
+    ankle_length = category == "bottoms" and bottom_length == "long"
     arguments = dict(
         person_image=person,
         garment_image=garment,
         category=inference_category,
         garment_photo_type=garment_photo_type,
         num_samples=int(num_samples),
-        num_timesteps=int(num_timesteps),
-        guidance_scale=float(guidance_scale),
+        num_timesteps=max(40, int(num_timesteps)) if ankle_length else int(num_timesteps),
+        guidance_scale=max(2.0, float(guidance_scale)) if ankle_length else float(guidance_scale),
         seed=int(seed),
         segmentation_free=False if masked else bool(segmentation_free),
     )
@@ -199,6 +202,17 @@ def run_tryon(
     # stage, including the first full-resolution uploaded person photo.
     before = person.resize(images[0].size, Image.Resampling.LANCZOS)
     before_labels = pipe.hp_model.predict(before)
+
+    def composite_bottom(candidates):
+        return [
+            preserve_unedited_regions(
+                before, generated, before_labels, pipe.hp_model.predict(generated), "bottoms"
+            )
+            for generated in candidates
+        ]
+
+    if category == "bottoms":
+        images = composite_bottom(images)
     fit = None
     if category == "bottoms" and bottom_length != "unknown":
         import numpy as np
@@ -212,13 +226,13 @@ def run_tryon(
             if attempt:
                 raise GarmentLengthError("Selected trouser length was not reproduced after masked retry")
             # One bounded retry only; avoid publishing shorts as long trousers.
-            images = list(
+            images = composite_bottom(
                 pipe(
                     **{
                         **arguments,
                         "seed": int(seed) + 1,
-                        "num_timesteps": min(50, int(num_timesteps) + 10),
-                        "guidance_scale": max(2.0, float(guidance_scale)),
+                        "num_timesteps": min(50, arguments["num_timesteps"] + 10),
+                        "guidance_scale": max(2.2, arguments["guidance_scale"]),
                     }
                 ).images
             )
@@ -255,7 +269,7 @@ def run_tryon(
                     layering["reason"] = "automatic_opening"
             restored.append(image)
         images = restored
-    else:
+    elif category != "bottoms":
         images = [
             preserve_unedited_regions(
                 before, generated, before_labels, pipe.hp_model.predict(generated), category

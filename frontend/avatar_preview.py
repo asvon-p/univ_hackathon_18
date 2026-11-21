@@ -25,7 +25,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from shared.tryon_contract import RENDER_VERSION, layering_warnings
+from shared.tryon_contract import RENDER_VERSION, WEARING_ORDER, layering_warnings
 from shared.tryon_maintenance import read_state
 from shared.wardrobes import single_wardrobe
 
@@ -50,7 +50,7 @@ async def avatar_page():
 # =============================================================================
 # 착샷 (FASHN VTON v1.5)
 # =============================================================================
-ORDER = ["bottom", "top", "outerwear"]  # 입히는 순서
+ORDER = WEARING_ORDER  # 하의 위에 상의, 그 위에 아우터를 겹친다.
 SLOT_NAMES = {"bottom": "하의", "top": "상의", "outerwear": "아우터"}
 STEP_TIMEOUT = 10 * 60
 POLL_SECONDS = 2

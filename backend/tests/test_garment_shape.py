@@ -14,18 +14,36 @@ from shared.garment_shape import shape_hints
         ("bottom", "denim shorts", "short"),
         ("bottom", "긴바지", "long"),
         ("bottom", "반바지", "short"),
-        ("bottom", "cropped pants", "unknown"),
+        ("bottom", "cropped pants", "long"),
+        ("bottom", "cotton_pants", "long"),
+        ("bottom", "jogger", "long"),
+        ("bottom", "long skirt", "unknown"),
     ],
 )
 def test_explicit_length_wins_over_square_photo(role, kind, expected):
     assert shape_hints(Image.new("RGB", (100, 100)), role, kind)["bottom_length"] == expected
 
 
-def test_real_silhouette_not_square_upload_frame_determines_length():
+def test_unknown_shape_uses_silhouette_not_square_upload_frame():
     for hem, expected in [(95, "long"), (43, "short")]:
         im = Image.new("RGBA", (100, 100))
         ImageDraw.Draw(im).rectangle((25, 5, 75, hem), fill=(50, 60, 100, 255))
-        assert shape_hints(im, "bottom", "pants")["bottom_length"] == expected
+        assert shape_hints(im, "bottom", None)["bottom_length"] == expected
+
+
+@pytest.mark.parametrize("kind", ["jeans", "slacks", "cotton_pants", "jogger", "pants", "9부 바지"])
+def test_wide_or_folded_trousers_cannot_be_downgraded_to_shorts(kind):
+    im = Image.new("RGBA", (100, 100))
+    ImageDraw.Draw(im).rectangle((5, 25, 95, 65), fill=(50, 60, 100, 255))
+    assert shape_hints(im, "bottom", kind)["bottom_length"] == "long"
+    with Image.open(BytesIO(refined_layer(im, wearing_role="bottom", garment_type=kind))) as layer:
+        assert layer.info["fitjang_bottom_length"] == "long"
+
+
+def test_explicit_shorts_are_not_lengthened_even_with_tall_cutout():
+    im = Image.new("RGBA", (100, 200))
+    ImageDraw.Draw(im).rectangle((35, 5, 65, 190), fill=(50, 60, 100, 255))
+    assert shape_hints(im, "bottom", "denim shorts")["bottom_length"] == "short"
 
 
 def test_regular_outer_shirt_is_not_mistaken_for_a_long_coat():

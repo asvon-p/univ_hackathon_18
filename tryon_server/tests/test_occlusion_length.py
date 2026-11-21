@@ -92,6 +92,8 @@ def pose():
     [
         ("long", 92, "matched"),
         ("long", 55, "mismatch"),
+        ("long", 81, "mismatch"),  # used to pass the old 80% threshold
+        ("long", 85, "mismatch"),  # cropped above the ankle
         ("short", 50, "matched"),
         ("short", 92, "mismatch"),
     ],
@@ -108,3 +110,42 @@ def test_missing_pose_never_claims_length_was_verified():
     incomplete = pose()
     incomplete["bodies"]["subset"][0, 10] = -1
     assert check_bottom_length(np.zeros((100, 100)), incomplete, "short")["status"] == "unverified"
+
+
+def test_only_one_long_leg_or_stray_ankle_patch_cannot_pass():
+    labels = np.zeros((100, 100), dtype="uint8")
+    labels[30:92, 28:43] = 6
+    labels[30:60, 58:73] = 6
+    assert check_bottom_length(labels, pose(), "long")["status"] == "mismatch"
+    labels[87:92, 58:73] = 6
+    assert check_bottom_length(labels, pose(), "long")["status"] == "mismatch"
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), 1.1])
+def test_invalid_ankle_coordinates_are_unverified(value):
+    points = pose()
+    points["bodies"]["candidate"][10, 1] = value
+    assert check_bottom_length(np.zeros((100, 100)), points, "long")["status"] == "unverified"
+
+
+def test_layers_occlude_in_bottom_top_outer_order_and_preserve_exposed_ankles():
+    size = (120, 240)
+    person = Image.new("RGB", size, "white")
+    old = np.zeros((240, 120), dtype="uint8")
+    old[35:100, 30:90] = 3
+    old[100:220, 35:85] = 14
+    bottom_labels = old.copy()
+    bottom_labels[100:220, 35:85] = 6
+    bottom = preserve_unedited_regions(person, Image.new("RGB", size, "blue"), old, bottom_labels, "bottoms")
+    top_labels = bottom_labels.copy()
+    top_labels[35:125, 30:90] = 3
+    top = preserve_unedited_regions(bottom, Image.new("RGB", size, "red"), bottom_labels, top_labels, "tops")
+    assert top.getpixel((50, 110)) == (255, 0, 0)  # shirt covers waistband
+    assert top.getpixel((50, 210)) == (0, 0, 255)  # selected trouser hem survives
+    outer_labels = top_labels.copy()
+    outer_labels[35:195, 25:95] = 4
+    outer = preserve_unedited_regions(top, Image.new("RGB", size, "green"), top_labels, outer_labels, "tops")
+    assert outer.getpixel((50, 110)) == (0, 128, 0)  # outer covers shirt
+    assert outer.getpixel((50, 175)) == (0, 128, 0)  # long outer covers pants
+    assert outer.getpixel((50, 210)) == (0, 0, 255)  # below outer hem: pants
+    assert outer.getpixel((50, 230)) == (255, 255, 255)

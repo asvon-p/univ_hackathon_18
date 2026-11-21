@@ -25,7 +25,7 @@ def pipeline(monkeypatch):
     ("category", "role", "length", "expected", "masked"),
     [
         ("bottoms", "bottom", "regular", "bottoms", True),
-        ("tops", "top", "regular", "tops", False),
+        ("tops", "top", "regular", "tops", True),
         ("tops", "outerwear", "regular", "tops", True),
         ("tops", "outerwear", "long", "one-pieces", True),
     ],
@@ -59,3 +59,20 @@ def test_length_retry_is_bounded_and_never_publishes_known_mismatch(monkeypatch,
     assert pipe.call_count == 2
     assert all(c.kwargs["segmentation_free"] is False for c in pipe.call_args_list)
     assert pipe.call_args_list[1].kwargs["seed"] == pipe.call_args_list[0].kwargs["seed"] + 1
+    assert [c.kwargs["num_timesteps"] for c in pipe.call_args_list] == [40, 50]
+
+
+def test_length_is_checked_after_compositing_not_just_raw_generation(monkeypatch):
+    pipe = pipeline(monkeypatch)
+    composed = Image.new("RGB", (128, 192), "green")
+    composite = Mock(return_value=composed)
+    monkeypatch.setattr("tryon_server.layering.preserve_unedited_regions", composite)
+    check = Mock(return_value={"status": "matched"})
+    monkeypatch.setattr("tryon_server.garment_length.check_bottom_length", check)
+    garment = Image.new("RGBA", (64, 128), "blue")
+    garment.info["fitjang_bottom_length"] = "long"
+    result = local_tryon.run_tryon(Image.new("RGB", (128, 192)), garment, "bottoms", "flat-lay")
+    assert result.images == [composed]
+    assert composite.call_count == 1
+    assert pipe.hp_model.predict.call_args.args[0] is composed
+    assert check.call_count == 1

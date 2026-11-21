@@ -168,3 +168,34 @@ def test_refinement_preserves_material_and_removes_speckles():
     assert out.getpixel((5, 5))[3] == 0
     assert out.getpixel((50, 50)) == (20, 30, 40, 255)
     assert 0 < out.getpixel((20, 50))[3] < 255
+
+
+@pytest.mark.parametrize(
+    "kind,length", [("jeans", "long"), ("cotton_pants", "long"), ("shorts", "short"), ("skirt", "unknown")]
+)
+def test_saved_bottom_type_controls_length_without_changing_original(
+    api_client, auth_account, account_factory, db_session, storage, kind, length
+):
+    headers = auth_account["headers"]
+    gid = api_client.post(
+        "/api/v1/garments", headers=headers, files={"file": ("pants.png", picture(), "image/png")}
+    ).json()["garment_id"]
+    path = f"/api/v1/garments/{gid}"
+    response = api_client.patch(path, headers=headers, json={"category": "bottom", "subcategory": kind})
+    assert response.status_code == 200
+    row = db_session.get(Garment, UUID(gid))
+    original = storage.open(row.original_path).read()
+    # Folded/wide garment: its silhouette must not reclassify saved jeans as shorts.
+    im = Image.new("RGBA", (200, 200))
+    ImageDraw.Draw(im).rectangle((10, 60, 190, 130), fill=(30, 60, 100, 255))
+    data = BytesIO()
+    im.save(data, format="PNG")
+    key = f"{auth_account['id']}/{gid}/cutout.png"
+    storage.save(key, data.getvalue())
+    row.cutout_path = key
+    db_session.commit()
+    response = api_client.get(path + "/layer-image", headers=headers)
+    assert response.status_code == 200
+    assert Image.open(BytesIO(response.content)).info["fitjang_bottom_length"] == length
+    assert storage.open(row.original_path).read() == original
+    assert api_client.get(path + "/layer-image", headers=account_factory()["headers"]).status_code == 404

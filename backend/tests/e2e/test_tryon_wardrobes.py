@@ -42,7 +42,7 @@ def setup_wardrobes(ui, api, email=None):
             api.patch(
                 f"/api/v1/garments/{personal[slot]}",
                 headers=headers,
-                json={"category": slot, "color": "navy", "style_candidates": ["casual"]},
+                json={"category": slot, "color": "navy", "style_candidates": ["casual"], "thermal_level": 3},
             ).status_code
             == 200
         )
@@ -74,7 +74,7 @@ def test_tryon_request_scopes_and_screen_warnings(live_frontend):
     assert not runtime["gpu_calls"].exists()
     assert api.get("/api/v1/tryon-results", headers=headers).json() == []
     for scope, items in (("personal", personal), ("example", example)):
-        page = submit_recommendation(ui, {"wardrobe": scope, "temp": "10"})
+        page = submit_recommendation(ui, {"wardrobe": scope, "temp": "20"})
         assert page.status_code == 200
         assert f'data-wardrobe="{scope}"' in page.text
         started = ui.post("/tryon", data={**items, "wardrobe": scope})
