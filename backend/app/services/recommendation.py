@@ -23,6 +23,7 @@ from backend.app.services.user_lock import require_active_user
 from backend.app.services.weather import resolve_weather
 from shared.contracts import RECOMMENDATION_CATEGORIES, GarmentAttributes, UserContext
 from shared.seasonal_weather import seasonal_temperature
+from shared.thermal_policy import requirements_notice
 
 log = logging.getLogger(__name__)
 
@@ -137,14 +138,42 @@ class RecommendationService:
             if body.reference_id
             else None
         )
-        weather_result = resolve_weather(
-            weather or ManualWeather(), body.lat, body.lon, body.temperature_c, body.season, body.month
+        weather_result = (
+            None
+            if body.forecast_token
+            else resolve_weather(
+                weather or ManualWeather(), body.lat, body.lon, body.temperature_c, body.season, body.month
+            )
         )
+        if body.forecast_token:
+            from backend.app.schemas.weather import WeatherResponse
+            from backend.app.services.weather_forecast import read_forecast_token
+
+            snapshot = read_forecast_token(body.forecast_token, user_id)
+            weather_result = WeatherResponse(
+                temperature_c=body.temperature_c if body.temperature_c is not None else snapshot.minimum_c,
+                source="open_meteo",
+                forecast=snapshot,
+                fetched_at=snapshot.fetched_at,
+                attribution="Weather data by Open-Meteo.com (CC BY 4.0)",
+            )
         profile = ProfileRepository(self.db).get(user_id)
+        if weather_result.forecast and day_plan:
+            from shared.weather_forecast import KST
+
+            if day_plan.date != weather_result.forecast.start_at.astimezone(KST).date():
+                raise AppError(
+                    422,
+                    ErrorCode.VALIDATION_ERROR,
+                    "남은 시간 예보는 오늘 일정에만 사용할 수 있습니다. "
+                    "오늘 일정을 선택하거나 기온을 직접 입력해 주세요.",
+                )
         context = UserContext(
             wardrobe=body.wardrobe,
             user_id=str(user_id),
             temperature_c=weather_result.temperature_c,
+            clothing_season=body.clothing_season or body.season,
+            weather_forecast=weather_result.forecast,
             season=body.season,
             month=(seasonal_temperature(body.season, body.month)[0] if body.season else None),
             occasion=body.occasion,
@@ -232,7 +261,8 @@ class RecommendationService:
             raise AppError(
                 422,
                 ErrorCode.NO_FEASIBLE_OUTFIT,
-                "선택한 옷과 확인된 일정 복장 조건을 모두 만족하는 코디가 없습니다. 조건을 확인해 주세요",
+                "보온도·필수 의류·일정·피드백 조건을 모두 만족하는 코디가 없습니다. "
+                + requirements_notice(context),
             )
 
         record = Recommendation(

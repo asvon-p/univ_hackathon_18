@@ -5,6 +5,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from shared.weather_forecast import ForecastWindow
+
 Temperature = Annotated[float, Field(ge=-90, le=60, allow_inf_nan=False, strict=True)]
 
 
@@ -12,6 +14,8 @@ class WeatherResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     temperature_c: Temperature
+    forecast: ForecastWindow | None = None
+    forecast_token: str | None = None
     condition: str | None = None
     location_name: str | None = None
     source: Literal["open_meteo", "manual", "seasonal"]

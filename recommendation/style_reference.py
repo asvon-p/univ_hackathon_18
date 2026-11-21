@@ -10,8 +10,9 @@ from recommendation.ranking import (
     calculate_style_score,
     supported_preferences,
 )
-from recommendation.rules import is_weather_suitable, iter_outfits
+from recommendation.rules import iter_outfits
 from shared.contracts import Outfit, OutfitItems, RecommendationResult, ReferenceMatch
+from shared.thermal_policy import outfit_violation, thermal_adjustment
 
 COLOR_GROUPS = (
     {"black", "gray"},
@@ -78,6 +79,8 @@ def compare(feature, garment, focus, required):
 
 
 def evaluate(context, top, bottom, outer):
+    if outfit_violation(context, top, bottom, outer):
+        return None
     day = evaluate_day(context, top, bottom, outer) if context.day_plan else None
     if context.day_plan and day is None:
         return None
@@ -110,6 +113,8 @@ def evaluate(context, top, bottom, outer):
         else [(20, occasion), (50, reference_score)]
     )
     total = sum(weight * score for weight, score in terms) / sum(weight for weight, _ in terms)
+    if not day:
+        total += thermal_adjustment(context, top, bottom, outer)
     limitations = list(day["limitations"]) if day else []
     limitations.append(
         "확인한 의류 영역의 색상·패턴·종류·스타일을 비교한 결과입니다. "
@@ -121,12 +126,6 @@ def evaluate(context, top, bottom, outer):
         limitations.append(
             "수동 확인 또는 픽셀 색상 추정 특징이 포함되어 있습니다. "
             "전체를 AI 사진 분석 성공으로 보지 않습니다"
-        )
-    if not context.day_plan and any(
-        g and not is_weather_suitable(g.thermal_level, context.temperature_c) for g in (top, bottom, outer)
-    ):
-        limitations.append(
-            "기온 필터를 완화한 대체 조합입니다. 선택 의류는 유지했으며 실제 기온 적합성을 확인해 주세요"
         )
     components = {
         **(day["score_components"] if day else {}),
@@ -147,17 +146,9 @@ def evaluate(context, top, bottom, outer):
 
 
 def recommend_reference(context, garments, *, relax_weather=False):
+    # Compatibility argument only: fallback must never relax per-slot warmth.
     def candidates():
         for index, (top, bottom, outer) in enumerate(iter_outfits(garments, context)):
-            if (
-                not context.day_plan
-                and not relax_weather
-                and any(
-                    g and not is_weather_suitable(g.thermal_level, context.temperature_c)
-                    for g in (top, bottom, outer)
-                )
-            ):
-                continue
             details = evaluate(context, top, bottom, outer)
             if details is not None:
                 yield details["score_components"]["total"], -index, top, bottom, outer, details

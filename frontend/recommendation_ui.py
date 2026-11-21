@@ -29,6 +29,7 @@ from shared.seasonal_weather import (
     season_for_month,
     seasonal_temperature,
 )
+from shared.thermal_policy import temperature_policy
 
 from .common import (
     CATEGORY_ORDER,
@@ -50,13 +51,14 @@ from .style_references import list_references
 
 router = APIRouter()
 
-# DECISIONS 기온 구간: ≤2 / 2~10 / 10~20 / ≥20°C
+# 보온 정책과 같은 구간: <0 / 0~5 / >5~15 / >15~22 / >22°C
 # 화면은 기온 숫자만 받음 (2026-11-07 시아: 구간 버튼 없앰). 아래는 예전 ?band= 주소용
 TEMP_BANDS = [
-    ("freezing", "한파", "2°C 이하", 0),
-    ("cold", "추움", "2~10°C", 6),
-    ("mild", "선선", "10~20°C", 15),
-    ("hot", "더움", "20°C 이상", 25),
+    ("freezing", "매우 추움", "0°C 미만", -3),
+    ("cold", "추움", "0~5°C", 3),
+    ("cool", "쌀쌀", "5°C 초과~15°C", 10),
+    ("mild", "선선", "15°C 초과~22°C", 18),
+    ("hot", "더움", "22°C 초과", 25),
 ]
 BAND_TEMP = {key: temp for key, _, _, temp in TEMP_BANDS}
 MAX_PREF_STYLES = 3  # 버튼으로 고르는 스타일 최대 개수
@@ -97,13 +99,7 @@ def with_iga(words: list[str]) -> str:
 
 
 def temp_band(temp: float) -> str:
-    if temp <= 2:
-        return "freezing"
-    if temp < 10:
-        return "cold"
-    if temp < 20:
-        return "mild"
-    return "hot"
+    return temperature_policy(temp).band
 
 
 async def wearable_garments(token: str, wardrobe="auto"):
@@ -220,6 +216,8 @@ async def recommend_page(
     wardrobe: str = "auto",
     temp: str = "",
     weather_mode: str = "temperature",
+    clothing_season: str = "",
+    forecast_token: str = "",
     season: str = "",
     month: str = "",
     occasion: str = "",
@@ -274,6 +272,8 @@ async def recommend_page(
             "wardrobe": wardrobe,
             "temp": temp,
             "weather_mode": weather_mode,
+            "clothing_season": clothing_season or season_for_month(current_month()),
+            "forecast_token": forecast_token,
             "season": season,
             "month": month,
             "occasion": occasion,
@@ -313,6 +313,8 @@ async def weather(request: Request, lat: float, lon: float):
         )
     return {
         "temperature_c": w.temperature_c,
+        "forecast": w.forecast,
+        "forecast_token": w.forecast_token,
         "band": temp_band(w.temperature_c),
         "condition": w.condition,
         "location_name": w.location_name,
@@ -352,6 +354,8 @@ async def submit_recommendation(request: Request):
         "band",
         "temp",
         "weather_mode",
+        "clothing_season",
+        "forecast_token",
         "season",
         "month",
         "occasion",
@@ -373,6 +377,8 @@ async def generate_recommendation(
     band: str = "",
     temp: str = "",
     weather_mode: str = "temperature",
+    clothing_season: str = "",
+    forecast_token: str = "",
     season: str = "",
     month: str = "",
     occasion: str = "",
@@ -396,6 +402,8 @@ async def generate_recommendation(
         "band": band,
         "temp": temp.strip(),
         "weather_mode": weather_mode or "temperature",
+        "clothing_season": clothing_season or season_for_month(current_month()),
+        "forecast_token": forecast_token,
         "season": season,
         "month": month,
         "occasion": occasion,
@@ -407,6 +415,10 @@ async def generate_recommendation(
 
     # 입력 검사 (화면에서 고르는 값이라 보통은 통과)
     errors: dict[str, str] = {}
+    if form["clothing_season"] not in SEASONS:
+        errors["clothing_season"] = "실내 복장에 적용할 계절을 선택해 주세요."
+    if form["weather_mode"] == "forecast" and not forecast_token:
+        errors["temp"] = "남은 시간 예보를 다시 조회해 주세요."
     ref_version = None
     if reference_id:
         try:
@@ -438,7 +450,7 @@ async def generate_recommendation(
             form["month"] = str(resolved_month)
         except (ValueError, TypeError):
             errors["temp"] = "계절과 해당 월을 선택해 주세요."
-    elif form["weather_mode"] != "temperature":
+    elif form["weather_mode"] not in ("temperature", "forecast"):
         errors["temp"] = "기온 입력 방식을 다시 선택해 주세요."
     elif form["temp"]:
         try:
@@ -502,6 +514,7 @@ async def generate_recommendation(
             wardrobe=wardrobe,
             user_id="me",  # TODO(C): 로그인(JWT) 후에는 백엔드가 토큰에서 사용자 확인
             temperature_c=temperature,
+            clothing_season=form["clothing_season"],
             season=season if form["weather_mode"] == "seasonal" else None,
             month=int(form["month"]) if form["weather_mode"] == "seasonal" else None,
             occasion=occasion or None,
@@ -514,7 +527,12 @@ async def generate_recommendation(
             schedule_version=version,
             outerwear_policy=outerwear_policy,
         )
-        result = await rec.recommend(token, context, request_key=request_key)
+        result = await rec.recommend(
+            token,
+            context,
+            request_key=request_key,
+            forecast_token=forecast_token if form["weather_mode"] == "forecast" else None,
+        )
     except ApiError as e:
         if e.status == 401:
             return logged_out()
@@ -598,7 +616,13 @@ async def saved_recommendation(request: Request, recommendation_id: UUID):
     form = {
         "wardrobe": context.wardrobe,
         "temp": context.temperature_c,
-        "weather_mode": "seasonal" if context.season else "temperature",
+        "weather_mode": "forecast"
+        if context.weather_forecast
+        else "seasonal"
+        if context.season
+        else "temperature",
+        "clothing_season": context.clothing_season or context.season or season_for_month(current_month()),
+        "forecast_token": result.forecast_token or "",
         "season": context.season or "",
         "month": str(context.month or ""),
         "occasion": context.occasion or "",
@@ -633,6 +657,7 @@ async def saved_recommendation(request: Request, recommendation_id: UUID):
         feedback_by_outfit=feedback_states,
         feedback_warning=feedback_warning,
         edit_url="/recommend?" + urlencode(edit, doseq=True),
+        regenerate_fields=edit,
         reference_id=context.reference_id,
         schedule_id=context.schedule_id,
         purposes=PURPOSE_LABELS,
@@ -669,9 +694,10 @@ async def recommend_feedback(
         and "\x00" not in reason
         and all(c in FEEDBACK_LABELS for c in (reason_codes or []))
     )
+    saved_codes = reason_codes or []
     if ok:
         try:
-            await rec.send_feedback(
+            saved_feedback = await rec.send_feedback(
                 token,
                 FeedbackEvent(
                     recommendation_id=recommendation_id,
@@ -681,12 +707,14 @@ async def recommend_feedback(
                     reason_codes=list(dict.fromkeys(reason_codes or [])),
                 ),
             )
+            if saved_feedback:
+                saved_codes = saved_feedback.get("reason_codes", saved_codes)
         except ApiError as e:
             if e.status == 401 and not by_fetch:
                 return logged_out()
             ok = False
     if by_fetch:
-        return JSONResponse({"ok": ok}, status_code=200 if ok else 400)
+        return JSONResponse({"ok": ok, "reason_codes": saved_codes}, status_code=200 if ok else 400)
     safe_back = back if back.startswith("/recommend") else "/recommend"
     return RedirectResponse(safe_back, status_code=303)
 
@@ -737,6 +765,15 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
 
 <form class="stack" method="post" action="/recommend" novalidate data-loading="코디 고르는 중…">
   <input type="hidden" name="request_key" value="{{ new_recommendation_key() }}">
+  <input type="hidden" name="forecast_token" id="forecast-token" value="{{form.forecast_token or ''}}">
+    <fieldset class="field required-slot">
+      <legend><label for="clothing-season">실내 복장에 적용할 계절</label></legend>
+      <select id="clothing-season" name="clothing_season" required>
+      {% for value,label in SEASONS.items() %}<option value="{{value}}" {% if form.clothing_season==value %}selected{% endif %}>{{label}}</option>{% endfor %}
+      </select>
+      <p class="hint">실내도 실외 기온을 기준으로 골라요. 겨울 실내는 상의 최소 보온도만 한 단계 낮추고, 여름 실내는 냉방 대비 얇은 아우터를 우선해요. 일정에 실내·실외를 지정해 주세요.</p>
+      {% if errors.clothing_season %}<p class="field-error">{{errors.clothing_season}}</p>{% endif %}
+    </fieldset>
     <fieldset class="field required-slot"><legend><label for="wardrobe-select">추천할 옷장</label></legend>
       <select id="wardrobe-select" name="wardrobe">
         <option value="personal" {% if form.wardrobe == 'personal' %}selected{% endif %}>내 옷장</option>
@@ -756,7 +793,7 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
       <legend><label for="schedule-id">하루 일정 (선택)</label></legend>
       <select id="schedule-id" name="schedule_id"><option value="">일정 없이 추천</option>{% for p in plans %}<option value="{{p.id}}" data-version="{{p.version}}" {% if schedule_id==p.id %}selected{% endif %}>{{p.date}} · 일정 {{p.events|length}}개</option>{% endfor %}</select>
       <input id="schedule-version" type="hidden" name="schedule_version" value="{{schedule_version or ''}}">
-      <p class="hint">저장한 일정의 시간·실내외·목적을 함께 고려해요. 구간 기온을 입력하지 않으면 보온 적합성은 판단하지 않아요.</p>
+      <p class="hint">실내외 모두 남은 시간 예보 또는 입력 기온을 기준으로 골라요. 직접 입력한 일정 기온이 더 춥거나 더우면 함께 고려해요.</p>
       <a id="schedule-manage" href="/day-plans?back={{('/recommend?' ~ request.url.query)|urlencode}}">하루 일정 입력·관리</a>
       <label for="outerwear-policy" style="margin-top:12px">아우터 착용 방식</label>
       <select id="outerwear-policy" name="outerwear_policy"><option value="always_worn">계속 입기</option><option value="removable" {% if outerwear_policy=='removable' %}selected{% endif %}>구간별로 벗고 소지 가능</option></select>
@@ -785,7 +822,8 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
     <fieldset class="field">
       <legend><label for="temp">오늘 기온</label></legend>
       <div class="chips">
-        <label class="chip"><input type="radio" name="weather_mode" value="temperature" {% if form.weather_mode != 'seasonal' %}checked{% endif %}><span>현재 기온 · 직접 입력</span></label>
+        <label class="chip"><input type="radio" name="weather_mode" value="forecast" {% if form.weather_mode == 'forecast' %}checked{% endif %}><span>지금부터 밤까지 예보</span></label>
+        <label class="chip"><input type="radio" name="weather_mode" value="temperature" {% if form.weather_mode not in ['seasonal','forecast'] %}checked{% endif %}><span>현재 기온 · 직접 입력</span></label>
         <label class="chip"><input type="radio" name="weather_mode" value="seasonal" {% if form.weather_mode == 'seasonal' %}checked{% endif %}><span>계절·월 평균으로 추천받기</span></label>
       </div>
       {% set selected_month = (form.month or current_month()) | int %}
@@ -807,7 +845,8 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
         <button type="button" class="step-btn" data-step="1" aria-label="1도 올리기">+</button>
       </div>
       <p class="wline"><span id="weather-status" aria-live="polite">{% if autofill %}지금 기온 불러오는 중…{% endif %}</span>
-        <button type="button" class="link-btn" id="weather-reload" {% if autofill %}hidden{% endif %}>지금 기온 불러오기</button></p>
+        <button type="button" class="link-btn" id="weather-reload" {% if autofill %}hidden{% endif %}>기온·남은 시간 예보 다시 조회</button></p>
+      <p class="hint" id="forecast-summary">예보는 현재 시각부터 오늘 24시 전까지(한국 시간)의 시간별 기온으로 계산해요. 과거 새벽과 다음 날 기온은 범위에서 제외해요. 예보는 30분 후 또는 자정에 다시 조회해야 해요.</p>
       {% if not USE_MOCK %}<p class="hint">Weather data by <a href="https://open-meteo.com/" target="_blank" rel="noopener noreferrer">Open-Meteo.com</a></p>{% endif %}
       {% if errors.temp %}<p class="field-error" id="temp-error">{{ errors.temp }}</p>{% endif %}
     </fieldset>
@@ -875,13 +914,15 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
   const seasonSelect=document.getElementById('season'), monthSelect=document.getElementById('month');
   const seasonMonths={{ SEASON_MONTHS | tojson }}, monthTemps={{ MONTHLY_TEMPERATURES | tojson }};
   const modes=[...document.querySelectorAll('input[name="weather_mode"]')];
+  const forecastToken=document.getElementById('forecast-token');
+  const forecastMode=()=>modes.find(b=>b.checked)?.value==='forecast';
   let weatherGeneration=0;
   const seasonal=()=>modes.find(b=>b.checked)?.value==='seasonal';
   function syncWeatherMode(){
     const active=seasonal();
     document.getElementById('season-controls').hidden=!active;
-    temp.readOnly=active;
-    document.querySelectorAll('.step-btn').forEach(b=>b.disabled=active);
+    temp.readOnly=active||forecastMode();
+    document.querySelectorAll('.step-btn').forEach(b=>b.disabled=active||forecastMode());
     if(active){
       const months=seasonMonths[seasonSelect.value];
       if(!months.includes(Number(monthSelect.value)))monthSelect.value=String(months[1]);
@@ -890,7 +931,7 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
       document.getElementById('season-estimate').textContent=`${monthSelect.value}월 전국 평균 ${temp.value}°C로 추천해요. 기상청 1991–2020 평년값이며 실제 현재 기온과 다를 수 있어요.`;
     }
   }
-  function userChange(){weatherGeneration++;wReload.hidden=false;syncWeatherMode();wStatus.textContent=seasonal()?'계절·월 평균 대체 기온을 사용해요.':'기온을 직접 확인해 주세요.';}
+  function userChange(){weatherGeneration++;wReload.hidden=false;syncWeatherMode();wStatus.textContent=seasonal()?'계절·월 평균 대체 기온을 사용해요.':forecastMode()?'남은 시간 예보를 조회해 주세요.':'기온을 직접 확인해 주세요.';}
   modes.forEach(b=>b.addEventListener('change',userChange));
   seasonSelect.addEventListener('change',userChange);monthSelect.addEventListener('change',userChange);
   temp.addEventListener('input',()=>{weatherGeneration++;wReload.hidden=false;});
@@ -922,7 +963,11 @@ RECOMMEND_FORM_HTML = """{% extends "app_base.html" %}
       const fallback=!w;
       if(!w)w=await fillWeather(37.57,126.98);
       if(generation!==weatherGeneration)return;
-      modes.forEach(b=>b.checked=b.value==='temperature');syncWeatherMode();temp.value=w.temperature_c;
+      forecastToken.value=w.forecast_token||'';
+      modes.forEach(b=>b.checked=b.value===(w.forecast&&w.forecast_token?'forecast':'temperature'));syncWeatherMode();temp.value=w.temperature_c;
+      document.getElementById('forecast-summary').textContent=w.forecast&&w.forecast_token?
+        `지금부터 오늘 24시 전까지 예상 최저 ${w.forecast.minimum_c}°C · 최고 ${w.forecast.maximum_c}°C · 한국 시간, 시간별 예보 기준. 30분 후에는 다시 조회해 주세요.`:
+        '남은 시간 예보를 받지 못해 현재 기온만 사용해요. 예보 다시 조회 또는 직접 입력이 가능해요.';
       const place=fallback?'서울':(w.location_name||'현재 위치');
       wStatus.textContent=w.is_stale?`${place} · ${Math.ceil((w.age_seconds||0)/60)}분 전 확인한 기온이에요. 현재와 다를 수 있어요. 잠시 후 다시 조회해 주세요.`:`${place} 기준`;
       if(w.fetched_at){const stamp=document.createElement('time');stamp.dateTime=w.fetched_at;stamp.textContent=' · 확인 '+new Date(w.fetched_at).toLocaleTimeString('ko-KR');wStatus.append(stamp);}
@@ -1031,11 +1076,13 @@ RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
   <div class="head">
     <div>
       <h1>추천 코디</h1>
-      <p class="hint">저장된 추천이에요. 새로고침해도 같은 코디를 보여드려요. 새 추천은 ‘조건 바꾸기’에서 요청해 주세요.</p>
+      <p class="hint">저장된 추천이에요. 새로고침은 결과 조회만 해요. 의견을 남긴 뒤 ‘피드백 반영해 다시 추천’을 눌러 주세요.</p>
       <p class="hint" data-feedback-scope="{{form.wardrobe}}">좋아요·별로예요는 다음 {{feedback_scope_name}} 추천에만 반영해요.{% if form.wardrobe == 'example' %} 내 옷장 추천에는 영향을 주지 않아요.{% elif form.wardrobe == 'personal' %} 테스트용 옷장 피드백은 섞이지 않아요.{% endif %}</p>
       {% if result.is_fallback %}<p class="hint" role="status">자동 판단을 사용할 수 없어 기본 추천 규칙으로 골랐어요. 필수 의류·일정·참고 스타일 조건은 유지했어요.</p>
       {% elif result.provider == 'openai' %}<p class="hint" role="status">AI가 검증된 코디 후보의 순서와 이유를 정했어요. 필수 의류·일정·참고 스타일 조건은 유지했어요.</p>{% endif %}
       <div class="conds" aria-label="고른 조건">
+        {% if result.context.clothing_season %}<span>실내 복장: {{SEASONS[result.context.clothing_season]}}</span>{% endif %}
+        {% if result.context.weather_forecast %}<span>추천 당시~오늘 24시 전 예상 {{result.context.weather_forecast.minimum_c}}~{{result.context.weather_forecast.maximum_c}}°C · 한국 시간</span>{% endif %}
         <span>{{ "%g" | format(temperature) }}°C{% if form.season %} · {{form.month}}월 전국 평균 대체값{% endif %}</span>
         {% if form.occasion %}<span>{{ form.occasion | ko("occasion") }}</span>{% endif %}
         {% for s in form.all_styles %}<span title="{{ s | term_description("style") }}">{{ s | ko("style") }}</span>{% endfor %}
@@ -1046,7 +1093,18 @@ RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
         {% if reference_id %}<span>참고 스타일 재현</span>{% endif %}
       </div>
     </div>
-    <a class="btn btn-secondary again" href="{{ edit_url }}">조건 바꾸기</a>
+    <div>
+      <form method="post" action="/recommend" id="regenerate-form">
+        <input type="hidden" name="request_key" value="{{ new_recommendation_key() }}">
+        {% for name,value in regenerate_fields.items() %}
+          {% if value is iterable and value is not string %}
+            {% for item in value %}<input type="hidden" name="{{name}}" value="{{item}}">{% endfor %}
+          {% else %}<input type="hidden" name="{{name}}" value="{{value}}">{% endif %}
+        {% endfor %}
+        <button class="btn btn-primary" type="submit">피드백 반영해 다시 추천</button>
+      </form>
+      <a class="btn btn-secondary again" href="{{ edit_url }}">조건 바꾸기</a>
+    </div>
   </div>
 
   {% if result.outfits %}
@@ -1097,7 +1155,7 @@ RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
     <div class="chips">{% for code,label in FEEDBACK_LABELS.items() %}<label class="chip"><input type="checkbox" name="reason_codes" value="{{code}}"><span>{{label}}</span></label>{% endfor %}</div>
     <label for="feedback-reason" style="display:block;margin-top:16px">자세한 의견 (선택)</label>
     <textarea id="feedback-reason" name="reason" rows="4" maxlength="1000" style="box-sizing:border-box;width:100%;font:inherit" placeholder="예: 밝은 색 조합보다 차분한 색이 좋아요"></textarea>
-    <p class="hint">개인정보는 적지 말아 주세요. GPT 판단 시 의견도 전달되며, 연결 실패 시에는 선택 이유와 기존 조합을 기준으로 순위를 조정해요.</p>
+    <p class="hint">‘추워요’, ‘영하인데 반팔이에요’ 같은 명확한 의견은 보온 조건에도 반영해요. 가장 정확하게 반영하려면 위 이유를 함께 선택해 주세요. 개인정보는 적지 말아 주세요.</p>
     <p id="feedback-error" role="alert"></p>
     <div style="display:flex;gap:8px"><button class="btn btn-primary" type="submit">피드백 저장</button><button class="btn btn-secondary" type="button" id="feedback-cancel">취소</button></div>
   </form>
@@ -1114,13 +1172,16 @@ RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
   async function saveFeedback(form, accepted, reason='', codes=[]){
     const body=new FormData(form);body.set('accepted',accepted);body.set('reason',reason);codes.forEach(c=>body.append('reason_codes',c));
     const buttons=[...form.querySelectorAll('button')];buttons.forEach(b=>b.disabled=true);
+    const regenerate=document.querySelector('#regenerate-form button');if(regenerate)regenerate.disabled=true;
     try{
       const res=await fetch(form.action,{method:'POST',body,headers:{'X-Requested-With':'fetch'}});
       if(!res.ok)throw new Error('save');
+      const saved=await res.json();codes=saved.reason_codes||codes;
       buttons.forEach(b=>b.setAttribute('aria-pressed',String(b.value===accepted)));
       form.dataset.reason=reason;form.dataset.codes=JSON.stringify(codes);
-      form.nextElementSibling.textContent={{('피드백을 저장했어요. 다음 ' ~ feedback_scope_name ~ ' 추천부터 반영해요.')|tojson}};
-    }finally{buttons.forEach(b=>b.disabled=false);}
+      const thermal=codes.includes('too_cold')?' 더 따뜻한 조합을 찾도록 반영했어요.':codes.includes('too_warm')?' 더 가벼운 조합을 찾도록 반영했어요.':'';
+      form.nextElementSibling.textContent={{('피드백을 저장했어요. 다음 ' ~ feedback_scope_name ~ ' 추천부터 반영해요.')|tojson}}+thermal+' 위의 ‘피드백 반영해 다시 추천’을 눌러 주세요.';
+    }finally{buttons.forEach(b=>b.disabled=false);if(regenerate)regenerate.disabled=false;}
   }
   document.querySelectorAll('form[data-fb]').forEach(form=>{
     form.addEventListener('submit',async e=>{
@@ -1145,6 +1206,7 @@ RECOMMEND_RESULT_HTML = """{% extends "app_base.html" %}
     }catch{feedbackError.textContent='저장하지 못했어요. 입력한 내용은 유지되니 다시 시도해 주세요.';}
     finally{saving=false;details.querySelector('[type="submit"]').disabled=false;}
   });
+  document.getElementById('regenerate-form')?.addEventListener('submit',e=>{e.currentTarget.querySelector('button').disabled=true;});
 </script>
 {% endblock %}
 """
@@ -1204,7 +1266,7 @@ HOME_HTML = """{% extends "app_base.html" %}
   <section class="sec" aria-labelledby="today-title">
     <div class="sec-head">
       <h2 id="today-title">최근 추천 코디</h2>
-      {% if weather %}<a href="/recommend?temp={{ '%g' | format(weather.temperature_c) }}">다른 코디</a>{% endif %}
+      {% if weather %}<a href="/recommend">다른 코디</a>{% endif %}
     </div>
     {% if outfit %}
     <article class="outfit">

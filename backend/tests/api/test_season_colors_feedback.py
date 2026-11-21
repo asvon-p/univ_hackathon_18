@@ -27,6 +27,15 @@ def test_monthly_weather_needs_no_network_and_is_persisted(
             raise AssertionError("Explicit season mode must not call the weather network")
 
     api_client.app.dependency_overrides[get_weather] = lambda: Offline()
+    # Seasonal routing is tested with season-appropriate clothes, not a winter-only closet.
+    if month == 1 or month in (6, 7, 8, 9):
+        for gid in closet.values():
+            role = db_session.get(GarmentAttribute, UUID(gid)).category
+            level = (5 if role == "outerwear" else 4) if month == 1 else 2
+            patched = api_client.patch(
+                f"/api/v1/garments/{gid}", headers=auth_account["headers"], json={"thermal_level": level}
+            )
+            assert patched.status_code == 200
     response = api_client.post(
         "/api/v1/recommendations",
         headers=auth_account["headers"],

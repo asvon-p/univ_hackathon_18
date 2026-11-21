@@ -174,6 +174,15 @@ def test_weather_failure_saves_user_supplied_temperature(
     api_client, auth_account, closet, db_session, temperature
 ):
     use_weather(api_client, httpx.Response(500))
+    from shared.thermal_policy import temperature_policy
+
+    policy = temperature_policy(temperature)
+    for role in ("top", "bottom", "outerwear"):
+        api_client.patch(
+            "/api/v1/garments/" + closet[role],
+            headers=auth_account["headers"],
+            json={"thermal_level": getattr(policy, role)},
+        )
     response = api_client.post(
         "/api/v1/recommendations",
         headers=auth_account["headers"],
@@ -207,6 +216,10 @@ def test_direct_temperature_skips_lookup_and_legacy_history_remains_readable(
     api_client, auth_account, closet, db_session
 ):
     calls = use_weather(api_client)
+    for role in ("top", "bottom"):
+        api_client.patch(
+            "/api/v1/garments/" + closet[role], headers=auth_account["headers"], json={"thermal_level": 1}
+        )
     response = api_client.post(
         "/api/v1/recommendations", headers=auth_account["headers"], json={"temperature_c": 23}
     )

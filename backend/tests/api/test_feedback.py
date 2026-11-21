@@ -107,10 +107,10 @@ def test_feedback_ownership_and_all_id_combinations(
     for category in ("top", "bottom", "shoes"):
         add_garment(other, category)
     foreign = api_client.post(
-        "/api/v1/recommendations", headers=other["headers"], json={"temperature_c": 20}
+        "/api/v1/recommendations", headers=other["headers"], json={"temperature_c": 18}
     ).json()
     own_second = api_client.post(
-        "/api/v1/recommendations", headers=auth_account["headers"], json={"temperature_c": 20}
+        "/api/v1/recommendations", headers=auth_account["headers"], json={"temperature_c": 18}
     ).json()
     path, headers = feedback_path(recommendation), auth_account["headers"]
     # 접근 거부가 이미 저장된 다른 사용자의 피드백을 바꾸거나 노출하지 않습니다.
@@ -270,7 +270,7 @@ def test_next_local_recommendation_receives_only_own_recent_feedback(
     for category in ("top", "bottom", "shoes"):
         add_garment(other, category)
     foreign = api_client.post(
-        "/api/v1/recommendations", headers=other["headers"], json={"temperature_c": 20}
+        "/api/v1/recommendations", headers=other["headers"], json={"temperature_c": 18}
     ).json()
     assert (
         api_client.post(
@@ -292,7 +292,7 @@ def test_next_local_recommendation_receives_only_own_recent_feedback(
     monkeypatch.setattr(engine_module, "recommend", capture)
     adapter = SafeRecommender(LocalRecommender(), timeout_sec=1)
     api_client.app.dependency_overrides[get_recommender] = lambda: adapter
-    response = api_client.post("/api/v1/recommendations", headers=headers, json={"temperature_c": 20})
+    response = api_client.post("/api/v1/recommendations", headers=headers, json={"temperature_c": 18})
     assert response.status_code == 201 and response.json()["provider"] == "local"
     expected = seen[0]["recent_feedback"]
     assert len(expected) == 1  # Latest opinion for each outfit, not repeated votes.
@@ -310,7 +310,7 @@ def test_next_local_recommendation_receives_only_own_recent_feedback(
         api_client.post(
             "/api/v1/recommendations",
             headers=headers,
-            json={"temperature_c": 20, "recent_feedback": expected},
+            json={"temperature_c": 18, "recent_feedback": expected},
         ).status_code
         == 422
     )
@@ -319,7 +319,7 @@ def test_next_local_recommendation_receives_only_own_recent_feedback(
     after_delete = api_client.post(
         "/api/v1/recommendations",
         headers={**headers, "Idempotency-Key": str(uuid4())},
-        json={"temperature_c": 20},
+        json={"temperature_c": 18},
     )
     assert after_delete.status_code == 201 and seen[-1]["recent_feedback"] == []
 

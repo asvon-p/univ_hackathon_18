@@ -9,9 +9,11 @@ from backend.app.core.config import Settings
 from shared.contracts import GarmentAttributes, UserContext
 
 GARMENTS = [
-    GarmentAttributes(garment_id="private-top", category="top", color="white"),
-    GarmentAttributes(garment_id="private-bottom", category="bottom", color="black"),
-    GarmentAttributes(garment_id="private-outer", category="outerwear", subcategory="shirt", color="navy"),
+    GarmentAttributes(garment_id="private-top", category="top", color="white", thermal_level=3),
+    GarmentAttributes(garment_id="private-bottom", category="bottom", color="black", thermal_level=3),
+    GarmentAttributes(
+        garment_id="private-outer", category="outerwear", subcategory="shirt", color="navy", thermal_level=4
+    ),
     GarmentAttributes(garment_id="legacy-shoes", category="shoes"),
 ]
 CONTEXT = UserContext(user_id="private-user", temperature_c=18, preferred_styles=["꾸안꾸"])
@@ -90,6 +92,41 @@ def test_openai_ranks_only_local_candidates_using_responses_schema():
         assert forbidden not in body["input"]
 
 
+def test_judge_receives_season_and_remaining_range_but_cannot_remove_warm_outer():
+    from datetime import datetime
+
+    from backend.tests.test_remaining_forecast import hourly_day
+    from shared.weather_forecast import KST, remaining_forecast
+
+    now = datetime(2026, 11, 21, 14, 30, tzinfo=KST)
+    context = CONTEXT.model_copy(
+        update={
+            "temperature_c": 25,
+            "clothing_season": "autumn",
+            "weather_forecast": remaining_forecast(hourly_day(now), now, now=now),
+            "required_garment_ids": ["private-top"],
+            "outerwear_policy": "removable",
+        }
+    )
+    seen = []
+
+    def respond(request):
+        payload = json.loads(json.loads(request.content)["input"])
+        seen.append(payload)
+        assert payload["clothing_season"] == "autumn"
+        assert payload["remaining_temperature_range"]["minimum_c"] == 3
+        assert payload["remaining_temperature_range"]["maximum_c"] == 25
+        assert all(c["items"]["outerwear"] for c in payload["candidates"])
+        return httpx.Response(200, json=completed([{"candidate_id": 0, "reason": "밤 추위에 대비한 아우터"}]))
+
+    result = SafeRecommender(
+        OpenAIRecommender(settings(), transport=httpx.MockTransport(respond)), 2, LocalFallback()
+    ).recommend(context, GARMENTS)
+    assert seen and not result.is_fallback
+    assert result.result.outfits[0].items.top == "private-top"
+    assert result.result.outfits[0].items.outerwear == "private-outer"
+
+
 @pytest.mark.parametrize(
     "failure",
     [
@@ -151,16 +188,15 @@ def test_missing_key_falls_back_without_network():
     assert result.is_fallback and result.result.outfits
 
 
-def test_local_fallback_still_works_when_weather_eliminates_every_candidate():
+def test_local_fallback_does_not_relax_weather_when_every_candidate_is_unsuitable():
     thick = [g.model_copy(update={"thermal_level": 5}) for g in GARMENTS]
     result = LocalFallback().recommend(UserContext(user_id="u", temperature_c=30), thick)
-    assert result.outfits and result.outfits[0].items.shoes is None
-    assert result.outfits[0].items.outerwear is None
+    assert not result.outfits
 
 
 @pytest.mark.parametrize("fail", [False, True])
 def test_gpt_judges_only_candidates_containing_required_items(fail):
-    context = CONTEXT.model_copy(update={"temperature_c": 30, "required_garment_ids": ["private-outer"]})
+    context = CONTEXT.model_copy(update={"temperature_c": 18, "required_garment_ids": ["private-outer"]})
     seen = []
 
     def respond(request):

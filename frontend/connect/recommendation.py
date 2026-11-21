@@ -44,6 +44,7 @@ class Outfit(BaseModel):
 
 class RecommendationResult(BaseModel):
     recommendation_id: str
+    forecast_token: str | None = None
     outfits: list[Outfit] = Field(default_factory=list, max_length=3)
     provider: str = "mock"
     is_fallback: bool = False
@@ -52,7 +53,7 @@ class RecommendationResult(BaseModel):
 
 
 async def recommend(
-    token: str, context: UserContext, *, request_key: str | None = None
+    token: str, context: UserContext, *, request_key: str | None = None, forecast_token: str | None = None
 ) -> RecommendationResult:
     if USE_MOCK:
         if request_key and (token, request_key) in _MOCK_REQUESTS:
@@ -69,7 +70,10 @@ async def recommend(
         "/recommendations",
         token=token,
         headers={"Idempotency-Key": request_key} if request_key else {},
-        json=context.model_dump(mode="json", exclude={"day_plan", "style_reference"}),
+        json={
+            **context.model_dump(mode="json", exclude={"day_plan", "style_reference", "weather_forecast"}),
+            "forecast_token": forecast_token,
+        },
     )
     return RecommendationResult(**data)
 
@@ -118,15 +122,15 @@ async def feedback_states(token: str, recommendation_id: str) -> dict:
     return latest
 
 
-async def send_feedback(token: str, event: FeedbackEvent) -> None:
+async def send_feedback(token: str, event: FeedbackEvent) -> dict:
     if USE_MOCK:
         _MOCK_FEEDBACK.append((token, event))
-        return
-    await request(
+        return event.model_dump()
+    return await request(
         "POST",
         f"/recommendations/{event.recommendation_id}/feedback",
         token=token,
-        json=event.model_dump(exclude={"garments"}),
+        json=event.model_dump(exclude={"garments", "temperature_c"}),
     )
 
 

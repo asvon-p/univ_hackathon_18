@@ -54,6 +54,9 @@ def garment_contract(garment: Garment) -> GarmentAttributes:
 
 
 def recommendation_view(record: Recommendation, garments: dict[str, GarmentView]) -> RecommendationResponse:
+    from backend.app.services.weather_forecast import forecast_token
+
+    context = UserContext.model_validate(record.context)
     outfits = [
         Outfit(
             outfit_id=str(row.id),
@@ -73,9 +76,10 @@ def recommendation_view(record: Recommendation, garments: dict[str, GarmentView]
     used = {gid for outfit in outfits for gid in outfit.items.model_dump().values() if gid}
     return RecommendationResponse(
         recommendation_id=str(record.id),
+        forecast_token=forecast_token(context.weather_forecast, record.user_id),
         outfits=outfits,
         garments={gid: garments[gid] for gid in sorted(used) if gid in garments},
-        context=UserContext.model_validate(record.context),
+        context=context,
         weather=record.context.get("weather"),
         provider=record.provider,
         is_fallback=record.provider == "fallback",
@@ -97,20 +101,30 @@ def feedback_view(record: FeedbackEvent) -> FeedbackResponse:
 
 
 def feedback_contract(record: FeedbackEvent, db=None, user_id=None) -> FeedbackContract:
+    from shared.feedback import effective_reason_codes
+    from shared.thermal_policy import temperature_checks
+
     garments = []
+    temperature = None
     if db is not None:
-        from backend.app.db.models import RecommendationOutfit
+        from backend.app.db.models import Recommendation, RecommendationOutfit
         from backend.app.repositories.garments import GarmentRepository
+        from shared.contracts import UserContext
 
         outfit = db.get(RecommendationOutfit, record.outfit_id)
         if outfit is not None:
             ids = {gid for gid in (outfit.top_id, outfit.bottom_id, outfit.outerwear_id) if gid}
             garments = [garment_contract(g) for g in GarmentRepository(db).by_ids(user_id, ids)]
+            recommendation = db.get(Recommendation, record.recommendation_id)
+            if recommendation and recommendation.user_id == user_id:
+                checks = temperature_checks(UserContext.model_validate(recommendation.context))
+                temperature = min((t for t, _ in checks), default=None)
     return FeedbackContract(
         recommendation_id=str(record.recommendation_id),
         outfit_id=str(record.outfit_id),
         accepted=record.accepted,
         reason=record.reason,
-        reason_codes=record.reason_codes or [],
+        reason_codes=effective_reason_codes(record.reason_codes, record.reason, accepted=record.accepted),
         garments=garments,
+        temperature_c=temperature,
     )

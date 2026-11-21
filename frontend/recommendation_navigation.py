@@ -7,6 +7,8 @@ RECOMMENDATION_FIELDS = frozenset(
         "temp",
         "wardrobe",
         "weather_mode",
+        "clothing_season",
+        "forecast_token",
         "season",
         "month",
         "occasion",

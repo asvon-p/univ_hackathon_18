@@ -14,31 +14,31 @@ def setup():
         )
 
     garments = [
-        garment("sport", "top", "sporty", 2),
-        garment("formal", "top", "formal", 2),
-        garment("bottom", "bottom", "formal", 2),
+        garment("sport", "top", "sporty", 3),
+        garment("formal", "top", "formal", 3),
+        garment("bottom", "bottom", "formal", 3),
         garment("outer", "outerwear", "formal", 4),
     ]
     return context, garments
 
 
-def test_purpose_changes_rank_and_current_weather_does_not_override_schedule():
+def test_purpose_changes_rank_and_indoor_schedule_does_not_erase_cold_weather():
     context, garments = setup()
     context.day_plan.events = context.day_plan.events[:1]
+    context.temperature_c = 18
     context.day_plan.events[0].purpose = "interview"
     assert recommend_day(context, garments).outfits[0].items.top == "formal"
     context.day_plan.events[0].purpose = "exercise"
     assert recommend_day(context, garments).outfits[0].items.top == "sport"
-    before = recommend_day(context, garments).model_dump()
     context.temperature_c = -20
-    assert recommend_day(context, garments).model_dump() == before
+    assert not recommend_day(context, garments).outfits
 
 
 def test_policy_range_priority_and_time_weight():
     context, garments = setup()
     _, top, bottom, outer = garments
     result = evaluate(context, top, bottom, outer)
-    assert [s.outerwear_action for s in result["wearing_plan"]] == ["carry", "wear"]
+    assert [s.outerwear_action for s in result["wearing_plan"]] == ["carry", "adjust"]
     context.outerwear_policy = "always_worn"
     assert all(s.outerwear_action == "wear" for s in evaluate(context, top, bottom, outer)["wearing_plan"])
     context.day_plan.events[0].purpose = "interview"
@@ -64,6 +64,6 @@ def test_constraints_and_missing_data_are_explained():
     context.day_plan.events[1].environment = "mixed"
     context.day_plan.events[1].outdoor_minutes = None
     result = recommend_day(context, garments).outfits[0]
-    assert "임시 50%" in result.wearing_plan[1].note
-    assert "보온 적합성은 판단하지 않음" in result.wearing_plan[0].note
+    assert "실내외 공통 기준" in result.wearing_plan[1].note
+    assert "현재 또는 수동 기온 기준" in result.wearing_plan[0].note
     assert result.wearing_plan[1].outerwear_action == "adjust"

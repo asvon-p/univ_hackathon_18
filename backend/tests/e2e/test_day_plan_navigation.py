@@ -52,7 +52,11 @@ def test_preserve_conditions_across_schedule_management(live_frontend):
             api.patch(
                 "/api/v1/garments/" + gid,
                 headers=account["headers"],
-                json={"category": category, "style_candidates": ["casual", "minimal"], "thermal_level": 3},
+                json={
+                    "category": category,
+                    "style_candidates": ["casual", "minimal"],
+                    "thermal_level": 5 if category == "outerwear" else 4,
+                },
             ).status_code
             == 200
         )

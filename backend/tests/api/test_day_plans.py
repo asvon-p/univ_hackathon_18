@@ -62,7 +62,7 @@ def test_owned_crud_versions_and_deleted_snapshot(
         outerwear_policy="removable",
     )
     assert result.status_code == 201, result.text
-    assert result.json()["outfits"][0]["wearing_plan"][0]["outerwear_action"] == "carry"
+    assert result.json()["outfits"][0]["wearing_plan"][0]["outerwear_action"] == "wear"
     new = api_client.patch(path, headers=auth_account["headers"], json={**plan_body(), "expected_version": 1})
     assert new.status_code == 200 and new.json()["version"] == 2
     assert (
@@ -177,8 +177,8 @@ def test_day_recommendation_persists_and_fallback_holds_required(api_client, aut
         assert outfit["items"]["top"] == closet["top"] and outfit["items"]["outerwear"] == closet["outerwear"]
         assert len(outfit["wearing_plan"]) == 2
         assert outfit["wearing_plan"][0]["outerwear_action"] == "carry"
-        assert outfit["wearing_plan"][1]["outerwear_action"] == "wear"
-        assert outfit["policy_version"] == "day-plan-v1"
+        assert outfit["wearing_plan"][1]["outerwear_action"] == "adjust"
+        assert outfit["policy_version"] == "day-plan-v4-season-forecast"
     assert (
         api_client.get(
             "/api/v1/recommendations/" + data["recommendation_id"], headers=auth_account["headers"]
@@ -305,6 +305,6 @@ def test_gpt_judges_candidates_without_editing_schedule(api_client, auth_account
     data = response.json()
     assert data["is_fallback"] == failure and data["provider"] == ("fallback" if failure else "openai")
     assert all(
-        o["items"]["outerwear"] == closet["outerwear"] and o["wearing_plan"][0]["outerwear_action"] == "carry"
+        o["items"]["outerwear"] == closet["outerwear"] and o["wearing_plan"][0]["outerwear_action"] == "wear"
         for o in data["outfits"]
     )

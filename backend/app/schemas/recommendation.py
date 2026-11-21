@@ -21,6 +21,8 @@ class RecommendationRequest(BaseModel):
     wardrobe: WardrobeScope = "all"
 
     temperature_c: Temperature | None = Field(default=None, examples=[8.5])
+    clothing_season: Season | None = None
+    forecast_token: str | None = Field(default=None, max_length=12000)
     season: Season | None = None
     month: int | None = Field(default=None, ge=1, le=12, strict=True)
     lat: float | None = Field(default=None, ge=-90, le=90, allow_inf_nan=False, strict=True)
@@ -33,6 +35,7 @@ class RecommendationRequest(BaseModel):
     schedule_version: int | None = Field(default=None, ge=1, strict=True)
     # Shared UserContext may serialize its empty internal snapshot. Never accept supplied content.
     day_plan: None = None
+    weather_forecast: None = None  # Empty shared context only; nonempty snapshots require a signed quote.
     reference_id: UUID | None = None
     reference_version: int | None = Field(default=None, ge=1, strict=True)
     style_reference: None = None
@@ -42,6 +45,8 @@ class RecommendationRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_temperature_or_location(self):
+        if self.forecast_token and (self.season is not None or self.lat is not None or self.lon is not None):
+            raise ValueError("예보와 계절 평균·위치 입력을 동시에 사용할 수 없습니다")
         if self.month is not None and self.season is None:
             raise ValueError("월과 계절을 함께 선택하세요")
         if self.season is not None:
@@ -56,13 +61,19 @@ class RecommendationRequest(BaseModel):
             raise ValueError("같은 옷을 필수 의류와 제외 의류로 선택할 수 없습니다")
         if (self.lat is None) != (self.lon is None):
             raise ValueError("lat와 lon을 함께 입력하세요")
-        if self.lat is None and self.temperature_c is None and self.season is None:
+        if (
+            self.lat is None
+            and self.temperature_c is None
+            and self.season is None
+            and not self.forecast_token
+        ):
             raise ValueError("현재 위치(lat/lon) 또는 수동 기온(temperature_c)이 필요합니다")
         return self
 
 
 class RecommendationResponse(BaseModel):
     recommendation_id: str
+    forecast_token: str | None = None
     outfits: list[Outfit]
     garments: dict[str, GarmentView] = Field(default_factory=dict, description="화면·2D 아바타용 옷 정보")
     provider: str

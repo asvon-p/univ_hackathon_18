@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from backend.app.core.config import Settings
 from backend.app.schemas.weather import Temperature, WeatherResponse
+from shared.weather_forecast import ForecastPoint, remaining_forecast
 
 log = logging.getLogger(__name__)
 CONDITIONS = {
@@ -185,9 +186,11 @@ class OpenMeteoWeather:
                     "latitude": lat,
                     "longitude": lon,
                     "current": "temperature_2m,weather_code",
+                    "hourly": "temperature_2m",
+                    "forecast_days": 2,
                     "temperature_unit": "celsius",
                     "timeformat": "unixtime",
-                    "timezone": "GMT",
+                    "timezone": "Asia/Seoul",
                 },
             )
         if response.status_code != 200:
@@ -201,8 +204,22 @@ class OpenMeteoWeather:
         weather_time = datetime.fromtimestamp(data.time, UTC)
         if not now - timedelta(hours=2) <= weather_time <= now + timedelta(minutes=20):
             raise ValueError("weather timestamp out of range")
+        forecast = None
+        try:
+            hourly = body["hourly"]
+            if body["hourly_units"] != {"time": "unixtime", "temperature_2m": "°C"}:
+                raise ValueError("forecast units mismatch")
+            points = [
+                ForecastPoint(at=datetime.fromtimestamp(t, UTC), temperature_c=v)
+                for t, v in zip(hourly["time"], hourly["temperature_2m"], strict=True)
+                if type(t) is int and type(v) in (int, float)
+            ]
+            forecast = remaining_forecast(points, now)
+        except (KeyError, ValueError, TypeError, OverflowError, OSError):
+            log.info("남은 시간 예보 없음: 현재 기온만 사용 가능")
         return WeatherResponse(
             temperature_c=data.temperature_2m,
+            forecast=forecast,
             condition=CONDITIONS.get(data.weather_code),
             source="open_meteo",
             weather_time=weather_time,

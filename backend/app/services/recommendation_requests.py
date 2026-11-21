@@ -18,11 +18,14 @@ def digest(value):
 
 def fingerprint(body):
     values = body.model_dump(
-        mode="json", exclude={"user_id", "recent_feedback", "day_plan", "style_reference"}
+        mode="json", exclude={"user_id", "recent_feedback", "day_plan", "style_reference", "weather_forecast"}
     )
     # Preserve fingerprints of requests made before wardrobe partitions existed.
     if values.get("wardrobe") == "all":
         values.pop("wardrobe")
+    for name in ("clothing_season", "forecast_token"):
+        if values.get(name) is None:
+            values.pop(name, None)
     for name in ("required_garment_ids", "excluded_items", "preferred_styles"):
         values[name] = sorted(set(values[name]))
     return digest(json.dumps(values, sort_keys=True, separators=(",", ":"), ensure_ascii=False))

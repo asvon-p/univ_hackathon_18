@@ -4,16 +4,16 @@ from backend.app.adapters.recommender import MockRecommender, SafeRecommender, v
 from shared.contracts import GarmentAttributes, Outfit, OutfitItems, RecommendationResult, UserContext
 
 G = [
-    GarmentAttributes(garment_id="T1", category="top", style_candidates=["minimal"]),
+    GarmentAttributes(garment_id="T1", category="top", style_candidates=["minimal"], thermal_level=3),
     GarmentAttributes(garment_id="T2", category="top", status="laundry"),
-    GarmentAttributes(garment_id="B1", category="bottom"),
+    GarmentAttributes(garment_id="B1", category="bottom", thermal_level=3),
     GarmentAttributes(garment_id="S1", category="shoes"),
     GarmentAttributes(garment_id="O1", category="outerwear", thermal_level=5),
 ]
 CTX = UserContext(user_id="U1", temperature_c=3)
 
 
-def outfit(oid, top="T1", bottom="B1", shoes="S1", outer=None):
+def outfit(oid, top="T1", bottom="B1", shoes="S1", outer="O1"):
     return Outfit(outfit_id=oid, items=OutfitItems(top=top, bottom=bottom, shoes=shoes, outerwear=outer))
 
 
@@ -110,6 +110,7 @@ def test_mock_ranks_large_wardrobe_without_expanding_every_combination():
             garment_id=f"{category}-{i}",
             category=category,
             style_candidates=["minimal"] if i >= 97 else ["casual"],
+            thermal_level=2,
         )
         for category in ("top", "bottom", "shoes")
         for i in range(100)

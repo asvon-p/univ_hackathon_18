@@ -24,7 +24,7 @@ def wardrobe():
 
 
 def context(styles, **kwargs):
-    return UserContext(user_id="local-ranking-test", temperature_c=15, preferred_styles=styles, **kwargs)
+    return UserContext(user_id="local-ranking-test", temperature_c=18, preferred_styles=styles, **kwargs)
 
 
 def test_switching_preference_reverses_ranking_with_same_colors_and_occasion():
@@ -72,11 +72,19 @@ def test_occasion_can_outweigh_preference_and_color_still_breaks_ties():
 
 
 def test_outerwear_preference_counts_without_bonus_for_extra_tags_or_items():
-    top = GarmentAttributes(garment_id="t", category="top", color="white", style_candidates=["street"])
-    bottom = GarmentAttributes(garment_id="b", category="bottom", color="black", style_candidates=["street"])
+    top = GarmentAttributes(
+        garment_id="t", category="top", color="white", style_candidates=["street"], thermal_level=3
+    )
+    bottom = GarmentAttributes(
+        garment_id="b", category="bottom", color="black", style_candidates=["street"], thermal_level=3
+    )
     outers = [
         GarmentAttributes(
-            garment_id=f"o-{style}", category="outerwear", color="gray", style_candidates=[style]
+            garment_id=f"o-{style}",
+            category="outerwear",
+            color="gray",
+            style_candidates=[style],
+            thermal_level=3,
         )
         for style in ("street", "minimal")
     ]
@@ -93,7 +101,7 @@ def test_outerwear_preference_counts_without_bonus_for_extra_tags_or_items():
 
 def test_preferred_clothes_still_respect_weather_status_exclusion_and_top_three():
     garments = wardrobe()
-    garments[2].thermal_level = 5  # 선호 상의라도 15도에 부적합
+    garments[2].thermal_level = 5  # 선호 상의라도 18도에 부적합
     garments.append(
         garments[2].model_copy(update={"garment_id": "laundry", "thermal_level": 3, "status": "laundry"})
     )

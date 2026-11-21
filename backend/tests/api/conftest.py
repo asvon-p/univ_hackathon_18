@@ -23,7 +23,12 @@ def add_garment(api_client, db_session):
         response = api_client.patch(
             f"/api/v1/garments/{garment_id}",
             headers=account["headers"],
-            json={"category": category, "status": status, "style_candidates": styles or ["minimal"]},
+            json={
+                "category": category,
+                "status": status,
+                "style_candidates": styles or ["minimal"],
+                "thermal_level": 4 if category == "outerwear" else 3,
+            },
         )
         assert response.status_code == 200, response.text
         if analysis_status != "done":

@@ -51,7 +51,7 @@ def test_fallback_never_replaces_required_outer(api_client, auth_account, closet
 
     use_engine(api_client, callback, timeout=0.01 if failure == "timeout" else 1)
     response = recommend(
-        api_client, auth_account, temperature_c=30, required_garment_ids=[closet["outerwear"]]
+        api_client, auth_account, temperature_c=18, required_garment_ids=[closet["outerwear"]]
     )
     assert response.status_code == 201, response.text
     assert response.json()["is_fallback"]
@@ -197,7 +197,7 @@ def test_judgment_adapter_and_fallback_save_only_fixed_owned_candidates(
     )
     api_client.app.dependency_overrides[get_recommender] = lambda: adapter
     required = [closet["top"], closet["outerwear"]]
-    response = recommend(api_client, auth_account, temperature_c=30, required_garment_ids=required)
+    response = recommend(api_client, auth_account, temperature_c=18, required_garment_ids=required)
     assert response.status_code == 201, response.text
     data = response.json()
     assert data["is_fallback"] == failure

@@ -6,8 +6,9 @@ from recommendation.personalization import feedback_adjustment
 from recommendation.rules import iter_outfits
 from shared.contracts import Outfit, OutfitItems, RecommendationResult
 from shared.day_plans import PURPOSE_LABELS, WearingStep
+from shared.thermal_policy import evaluate_thermal_check, outfit_violation, thermal_checks
 
-POLICY_VERSION = "day-plan-v1"
+POLICY_VERSION = "day-plan-v4-season-forecast"
 PURPOSE_OCCASION = {
     "class": "daily",
     "presentation": "work",
@@ -22,6 +23,8 @@ PURPOSE_OCCASION = {
 
 def evaluate(context, top, bottom, outer):
     """Return server-owned explanations, or None for a confirmed hard-style conflict."""
+    if outfit_violation(context, top, bottom, outer):
+        return None
     from recommendation.ranking import (
         calculate_occasion_score,
         calculate_palette_score,
@@ -56,64 +59,18 @@ def evaluate(context, top, bottom, outer):
         minutes = (event.end_at - event.start_at).total_seconds() / 60
         weight = max(0.25, min(minutes / 60, 2)) * (2 if event.priority == "high" else 1)
         note = [f"{PURPOSE_LABELS[event.purpose]}의 분위기와 활동 강도 고려"]
-        action = "none" if outer is None else "wear"
-        if outer and removable and event.environment == "indoor" and event.temperature_min_c is None:
-            action = "carry"
-        known_temp = event.temperature_min_c is not None and event.environment != "unknown"
-        thermal_known = (
-            top.thermal_level is not None
-            and bottom.thermal_level is not None
-            and (outer is None or outer.thermal_level is not None)
-        )
-        if known_temp and thermal_known:
-            # For mixed environments the supplied range describes outdoor exposure only.
-            target_temps = (event.temperature_min_c, event.temperature_max_c)
-
-            def thermal_score(worn, event=event, target_temps=target_temps):
-                insulation = min(
-                    5,
-                    0.6 * top.thermal_level
-                    + 0.4 * bottom.thermal_level
-                    + (0.6 * outer.thermal_level if worn and outer else 0),
-                )
-                targets = [
-                    max(1, min(5, 5 - (t + 2) / 8) - {"low": 0, "normal": 0.2, "high": 0.7}[event.intensity])
-                    for t in target_temps
-                ]
-                return max(0, 100 - 30 * max(abs(insulation - target) for target in targets))
-
-            on = thermal_score(outer is not None)
-            off = thermal_score(False)
-            if outer and removable:
-                action = "wear" if on > off else "carry"
-            thermal = on if action == "wear" else off
-            if thermal < 50:
-                note.append("보온 조합과 입력 기온 차이가 큼: 실제 착용 가능 여부 확인 필요")
-                limitations.append(f"일정 {index + 1}: 보온 조건이 충분하지 않을 수 있습니다")
-            exposure = 1.0
-            if event.environment == "mixed":
-                exposure = event.outdoor_minutes / minutes if event.outdoor_minutes is not None else 0.5
-                if event.outdoor_minutes is None:
-                    note.append("야외 시간 미입력: 혼합 비중은 임시 50%로 평가")
-                note.append("입력 기온은 야외 구간에만 적용; 실내 온도는 알 수 없음")
-                if outer and removable:
-                    action = "adjust"
-                    note.append(
-                        "야외에서는 "
-                        + ("아우터 착용" if on > off else "아우터를 벗고 소지")
-                        + ", 실내에서는 체감에 맞춰 조절"
-                    )
-            score = (1 - 0.4 * exposure) * purpose_score + 0.4 * exposure * thermal
-            note.append(f"수동 기온 {event.temperature_min_c:g}~{event.temperature_max_c:g}°C 기준")
-        else:
-            score = purpose_score
-            if not known_temp:
-                note.append("구간 기온 미확정: 보온 적합성은 판단하지 않음")
-            if not thermal_known:
-                note.append("의류 보온도 미확정: 보온 적합성은 판단하지 않음")
-            limitations.append(f"일정 {index + 1}: 기온 또는 의류 보온도 정보가 부족합니다")
-            if outer and removable and event.environment in ("mixed", "unknown"):
-                action = "adjust"
+        check = thermal_checks(context)[index]
+        thermal, action, thermal_note = evaluate_thermal_check(context, check, top, bottom, outer)
+        note.append(thermal_note)
+        score = 0.6 * purpose_score + 0.4 * thermal
+        if context.weather_forecast:
+            note.append("현재 시각부터 오늘 24시 전까지의 시간별 예보 기준")
+        elif event.temperature_min_c is None:
+            note.append("시간별 예보 없음: 현재 또는 수동 기온 기준")
+        if thermal < 50:
+            limitations.append(
+                f"일정 {index + 1}: 추운 시간과 더운 시간에 모두 편안한 복장이 아닐 수 있습니다"
+            )
         if outer and not removable:
             note.append("계속 입기 설정을 유지; 더우면 조건 변경 필요")
         if event.required_style:

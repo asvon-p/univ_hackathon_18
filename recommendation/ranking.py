@@ -2,7 +2,7 @@ from itertools import product
 from typing import get_args
 
 from recommendation.personalization import feedback_adjustment
-from recommendation.rules import filter_outfits_by_weather, generate_outfits
+from recommendation.rules import generate_outfits
 from shared.contracts import GarmentAttributes, StyleTag, UserContext
 
 STYLE_TAGS = frozenset(get_args(StyleTag))
@@ -202,6 +202,8 @@ def score_garment_pair(
     outer: GarmentAttributes | None = None,
 ) -> float:
 
+    from shared.thermal_policy import thermal_adjustment
+
     base = calculate_total_score(
         top_color=top.color,
         bottom_color=bottom.color,
@@ -216,7 +218,13 @@ def score_garment_pair(
         top.color, bottom.color, outer.color if outer else None
     )
     weight = 0.7 if supported_preferences(context.preferred_styles) else 1.0
-    return round(base + color_delta * weight + feedback_adjustment(context, top, bottom, outer), 2)
+    return round(
+        base
+        + color_delta * weight
+        + feedback_adjustment(context, top, bottom, outer)
+        + thermal_adjustment(context, top, bottom, outer),
+        2,
+    )
 
 
 def score_outfits(outfits: list[dict], garments: list[GarmentAttributes], context: UserContext) -> list[dict]:
@@ -248,7 +256,7 @@ def recommend_top3(garments: list[GarmentAttributes], context: UserContext) -> l
     outfits = generate_outfits(garments, context)
 
     # 2. 날씨에 맞지 않는 코디 제외
-    filtered_outfits = filter_outfits_by_weather(outfits, context.temperature_c)
+    filtered_outfits = outfits  # generate_outfits already applies the full season/forecast context.
 
     # 3. 코디 정보를 딕셔너리로 변환
     outfit_dicts = []

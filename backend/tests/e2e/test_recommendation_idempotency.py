@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, text
 
 from backend.tests.api.test_style_references import fixture_photo
 from backend.tests.e2e.recommendation_flow import submit_recommendation
+from shared.seasonal_weather import current_month, season_for_month
 
 
 @pytest.mark.parametrize(
@@ -52,7 +53,12 @@ def test_shared_database_claim_concurrent_users_and_refresh_are_read_only(live_f
             )
             assert changed.status_code == 200
     key, barrier = str(uuid4()), Barrier(8)
-    body = {"temperature_c": 7.5, "preferred_styles": ["minimal"]}
+    body = {
+        "temperature_c": 7.5,
+        "preferred_styles": ["minimal"],
+        "wardrobe": "personal",
+        "clothing_season": season_for_month(current_month()),
+    }
 
     def concurrent(index):
         base = str(api.base_url) if index % 2 else runtime["replica_url"]
@@ -92,7 +98,7 @@ def test_shared_database_claim_concurrent_users_and_refresh_are_read_only(live_f
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM recommendations")) == 2
         assert connection.scalar(text("SELECT count(*) FROM api_usage")) == 2
-        assert connection.scalar(text("SELECT sum(estimated_usd) FROM api_usage")) == pytest.approx(.000264)
+        assert connection.scalar(text("SELECT sum(estimated_usd) FROM api_usage")) == pytest.approx(0.000264)
         assert (
             connection.scalar(text("SELECT count(*) FROM recommendation_requests WHERE status='completed'"))
             == 2

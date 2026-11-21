@@ -379,7 +379,7 @@ def test_local_provider_connects_actual_recommendation_package(api_client, auth_
     try:
         body = recommend(api_client, auth_account).json()
         assert body["provider"] == "local" and body["is_fallback"] is False
-        assert body["outfits"][0]["items"] == {**closet, "shoes": None, "outerwear": None}
+        assert body["outfits"][0]["items"] == {**closet, "shoes": None}
         assert "색상·상황 점수" in body["outfits"][0]["reason"]
         assert body["outfits"][0]["score"] is not None
     finally:

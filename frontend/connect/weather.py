@@ -14,6 +14,8 @@ SEOUL = (37.5665, 126.9780)  # 위치를 못 받을 때 기준
 @dataclass
 class Weather:
     temperature_c: float
+    forecast: dict | None = None
+    forecast_token: str | None = None
     condition: str | None = None
     location_name: str | None = None
     is_stale: bool = False
@@ -29,6 +31,8 @@ async def get_weather(token: str, lat: float, lon: float) -> Weather:
     data = await request("GET", "/weather", token=token, params={"lat": lat, "lon": lon})
     return Weather(
         temperature_c=round(float(data["temperature_c"]), 1),
+        forecast=data.get("forecast"),
+        forecast_token=data.get("forecast_token"),
         condition=data.get("condition"),
         location_name=data.get("location_name"),
         is_stale=data.get("is_stale", False),

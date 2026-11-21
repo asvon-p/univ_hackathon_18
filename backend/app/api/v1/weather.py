@@ -6,6 +6,8 @@ from backend.app.adapters.base import WeatherPort
 from backend.app.deps import get_current_user_id, get_weather
 from backend.app.schemas.weather import WeatherResponse
 from backend.app.services.weather import resolve_weather
+from backend.app.services.weather_forecast import forecast_token
+from shared.weather_forecast import refresh_window
 
 router = APIRouter(prefix="/api/v1/weather", tags=["weather"])
 
@@ -21,4 +23,13 @@ def get_current_weather(
 ):
     """위치의 현재 기온. 조회 실패 시 전달한 수동 기온 사용, 없으면 503 WEATHER_UNAVAILABLE."""
     response.headers["Cache-Control"] = "private, no-store"
-    return resolve_weather(provider, lat, lon, temperature_c)
+    reading = resolve_weather(provider, lat, lon, temperature_c)
+    snapshot = reading.forecast
+    if snapshot:
+        try:
+            snapshot = refresh_window(snapshot)
+        except ValueError:
+            snapshot = None
+    return reading.model_copy(
+        update={"forecast": snapshot, "forecast_token": forecast_token(snapshot, user_id)}
+    )

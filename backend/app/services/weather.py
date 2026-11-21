@@ -2,6 +2,7 @@ from backend.app.adapters.base import WeatherPort
 from backend.app.core.errors import AppError, ErrorCode
 from backend.app.schemas.weather import WeatherResponse
 from shared.seasonal_weather import ATTRIBUTION, seasonal_temperature
+from shared.weather_forecast import refresh_window
 
 
 def resolve_weather(
@@ -26,6 +27,11 @@ def resolve_weather(
     if has_location:
         reading = provider.current(lat, lon)
         if reading is not None:
+            if reading.forecast:
+                try:
+                    reading = reading.model_copy(update={"forecast": refresh_window(reading.forecast)})
+                except ValueError:
+                    reading = reading.model_copy(update={"forecast": None})
             return reading
     if temperature_c is not None:
         return WeatherResponse(temperature_c=temperature_c, source="manual", is_fallback=has_location)

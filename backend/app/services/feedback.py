@@ -9,6 +9,7 @@ from backend.app.mappers import feedback_view
 from backend.app.repositories.feedback import FeedbackRepository
 from backend.app.repositories.recommendations import RecommendationRepository
 from backend.app.schemas.feedback import FeedbackRequest, FeedbackResponse
+from shared.feedback import effective_reason_codes
 
 
 class FeedbackService:
@@ -33,7 +34,7 @@ class FeedbackService:
                 outfit_id=body.outfit_id,
                 accepted=body.accepted,
                 reason=body.reason,
-                reason_codes=list(dict.fromkeys(body.reason_codes)),
+                reason_codes=effective_reason_codes(body.reason_codes, body.reason, accepted=body.accepted),
                 created_at=datetime.now(UTC),
             )
             self.feedback.add(record)

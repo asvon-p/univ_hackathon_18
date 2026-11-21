@@ -180,7 +180,7 @@ def test_reference_changes_actual_ranking(api_client, auth_account, add_garment)
         response = recommend(
             api_client,
             auth_account,
-            temperature_c=15,
+            temperature_c=18,
             reference_id=ref["id"],
             reference_version=ref["version"],
         )

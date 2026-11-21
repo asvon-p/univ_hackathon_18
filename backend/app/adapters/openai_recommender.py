@@ -93,6 +93,14 @@ class OpenAIRecommender:
             else [],
             "reference_focus": context.style_reference.focus if context.style_reference else None,
             "outerwear_policy": context.outerwear_policy,
+            "clothing_season": context.clothing_season or context.season,
+            "remaining_temperature_range": {
+                "minimum_c": context.weather_forecast.minimum_c,
+                "maximum_c": context.weather_forecast.maximum_c,
+                "scope": "now until midnight Asia/Seoul",
+            }
+            if context.weather_forecast
+            else None,
             "schedule": [
                 {
                     "duration_minutes": (e.end_at - e.start_at).total_seconds() / 60,

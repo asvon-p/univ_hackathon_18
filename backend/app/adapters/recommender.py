@@ -25,11 +25,20 @@ from shared.contracts import (
     UserContext,
 )
 from shared.recommendation_constraints import required_by_category
+from shared.thermal_policy import (
+    POLICY_VERSION,
+    evaluate_thermal_check,
+    garment_violation,
+    outfit_violation,
+    temperature_checks,
+    temperature_policy,
+    thermal_adjustment,
+    thermal_checks,
+)
 
 log = logging.getLogger(__name__)
 
 MAX_OUTFITS = 3
-OUTERWEAR_BELOW_C = 15.0  # 이 기온 미만이면 아우터 포함 (A 의 규칙이 우선, 이 값은 대체 추천용)
 
 
 def usable_garments(context: UserContext, garments: list[GarmentAttributes]) -> list[GarmentAttributes]:
@@ -56,6 +65,11 @@ class MockRecommender:
 
             return recommend_day(context, garments)
         usable = usable_garments(context, garments)
+        usable = [
+            g
+            for g in usable
+            if all(garment_violation(g, g.category, t) is None for t, _ in temperature_checks(context))
+        ]
         by_cat = {c: [g for g in usable if g.category == c] for c in RECOMMENDATION_CATEGORIES}
         try:
             required = required_by_category(context, usable)
@@ -67,7 +81,9 @@ class MockRecommender:
             return RecommendationResult(recommendation_id="mock", outfits=[])
 
         prefs = set(context.preferred_styles)
-        need_outer = context.temperature_c < OUTERWEAR_BELOW_C and bool(by_cat["outerwear"])
+        need_outer = any(
+            temperature_policy(t).outer_required for t, _ in temperature_checks(context)
+        ) and bool(by_cat["outerwear"])
 
         def style_score(*items: GarmentAttributes) -> int:
             return sum(len(prefs & set(g.style_candidates)) for g in items)
@@ -75,18 +91,31 @@ class MockRecommender:
         # 피드백이 있으면 조합별 판단이 필요하므로 전체 후보를 순회합니다.
         # 점수가 슬롯별 합이므로 각 슬롯 상위 3개만으로 전체 상위 3개를 만들 수 있습니다.
         # 옷장이 커져도 대체 추천이 모든 조합을 메모리에 쌓지 않습니다.
-        if not context.recent_feedback:
+        if not context.recent_feedback and context.weather_forecast is None:
             for category in ("top", "bottom"):
                 by_cat[category] = sorted(by_cat[category], key=lambda g: -style_score(g))[:MAX_OUTFITS]
-        outer = required.get("outerwear") or (
-            max(by_cat["outerwear"], key=lambda o: o.thermal_level or 0) if need_outer else None
-        )
+        if (context.recent_feedback or context.weather_forecast) and "outerwear" not in required:
+            outers = [None, *by_cat["outerwear"]]
+        else:
+            outers = [
+                required.get("outerwear")
+                or (max(by_cat["outerwear"], key=lambda o: o.thermal_level or 0) if need_outer else None)
+            ]
         from recommendation.personalization import feedback_adjustment
 
         def scored_combinations():
-            for top, bottom in itertools.product(by_cat["top"], by_cat["bottom"]):
+            for top, bottom, outer in itertools.product(by_cat["top"], by_cat["bottom"], outers):
+                if outfit_violation(context, top, bottom, outer):
+                    continue
                 items = [g for g in (top, bottom, outer) if g]
-                yield (style_score(*items) + feedback_adjustment(context, *items), top, bottom, outer)
+                yield (
+                    style_score(*items)
+                    + feedback_adjustment(context, *items)
+                    + thermal_adjustment(context, top, bottom, outer),
+                    top,
+                    bottom,
+                    outer,
+                )
 
         combos = nlargest(MAX_OUTFITS, scored_combinations(), key=lambda c: c[0])
 
@@ -106,7 +135,7 @@ class MockRecommender:
                     ),
                     style_tags=tags,
                     reason=(
-                        "선택한 옷을 유지한 기본 조합입니다. 기온 적합성은 직접 확인해 주세요"
+                        "선택한 옷과 의류별 최소 보온 조건을 유지한 기본 조합입니다"
                         if required
                         else f"{context.temperature_c:g}°C 기준 사용 가능한 옷으로 만든 기본 조합"
                     ),
@@ -223,6 +252,12 @@ def validate_result(raw, context: UserContext, garments: list[GarmentAttributes]
         if problem:
             dropped.append(f"{outfit.outfit_id}: {problem}")
             continue
+        thermal_problem = outfit_violation(
+            context, usable[outfit.items.top], usable[outfit.items.bottom], usable.get(outfit.items.outerwear)
+        )
+        if thermal_problem:
+            dropped.append(f"{outfit.outfit_id}: {thermal_problem}")
+            continue
         if context.style_reference is not None or context.day_plan is not None:
             if context.style_reference is not None:
                 from recommendation.style_reference import evaluate
@@ -245,9 +280,20 @@ def validate_result(raw, context: UserContext, garments: list[GarmentAttributes]
             outfit = outfit.model_copy(
                 update={
                     "wearing_plan": [],
-                    "limitations": [],
+                    "limitations": [
+                        evaluate_thermal_check(
+                            context,
+                            c,
+                            usable[outfit.items.top],
+                            usable[outfit.items.bottom],
+                            usable.get(outfit.items.outerwear),
+                        )[2]
+                        for c in thermal_checks(context)
+                    ]
+                    if context.weather_forecast
+                    else [],
                     "score_components": {},
-                    "policy_version": None,
+                    "policy_version": POLICY_VERSION if context.weather_forecast else None,
                     "reference_matches": [],
                 }
             )

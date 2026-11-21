@@ -1,5 +1,6 @@
 from shared.contracts import GarmentAttributes, UserContext
 from shared.recommendation_constraints import required_by_category
+from shared.thermal_policy import garment_violation, outfit_violation, temperature_policy
 
 
 def classify_clothes(garments: list[GarmentAttributes]):
@@ -28,57 +29,18 @@ def classify_clothes(garments: list[GarmentAttributes]):
 
 
 def get_temperature_category(temperature_c: float) -> str:
-    if temperature_c <= 2:
-        return "very_cold"
-    elif temperature_c < 10:
-        return "cold"
-    elif temperature_c < 20:
-        return "mild"
-    else:
-        return "hot"
+    band = temperature_policy(temperature_c).band
+    return "very_cold" if band == "freezing" else band
 
 
-def is_weather_suitable(thermal_level: int | None, temperature_c: float) -> bool:
-
-    # 두께 정보가 없는 옷은 일단 허용
-    if thermal_level is None:
-        return True
-
-    weather = get_temperature_category(temperature_c)
-
-    if weather == "very_cold":
-        return 5 <= thermal_level <= 5
-
-    elif weather == "cold":
-        return 4 <= thermal_level <= 5
-
-    elif weather == "mild":
-        return 2 <= thermal_level <= 4
-
-    else:
-        return 1 <= thermal_level <= 2
+def is_weather_suitable(thermal_level: int | None, temperature_c: float, role="top") -> bool:
+    garment = GarmentAttributes(garment_id="check", category=role, thermal_level=thermal_level)
+    return garment_violation(garment, role, temperature_c) is None
 
 
 def filter_outfits_by_weather(outfits: list, temperature_c: float):
-    filtered_outfits = []
-
-    for top, bottom, outer in outfits:
-        # 상의가 날씨에 적합한지 확인
-        if not is_weather_suitable(top.thermal_level, temperature_c):
-            continue
-
-        # 하의가 날씨에 적합한지 확인
-        if not is_weather_suitable(bottom.thermal_level, temperature_c):
-            continue
-
-        # 아우터가 있다면 날씨 적합도 확인
-        if outer is not None:
-            if not is_weather_suitable(outer.thermal_level, temperature_c):
-                continue
-
-        filtered_outfits.append((top, bottom, outer))
-
-    return filtered_outfits
+    context = UserContext(user_id="weather-filter", temperature_c=temperature_c)
+    return [items for items in outfits if outfit_violation(context, *items) is None]
 
 
 def iter_outfits(garments: list[GarmentAttributes], context: UserContext | None = None):
@@ -102,12 +64,15 @@ def iter_outfits(garments: list[GarmentAttributes], context: UserContext | None 
     for top in tops:
         for bottom in bottoms:
             # 아우터가 없는 코디
-            if "outerwear" not in required:
+            if "outerwear" not in required and (
+                context is None or outfit_violation(context, top, bottom, None) is None
+            ):
                 yield top, bottom, None
 
             # 아우터가 있는 코디
             for outer in outerwear:
-                yield top, bottom, outer
+                if context is None or outfit_violation(context, top, bottom, outer) is None:
+                    yield top, bottom, outer
 
 
 def generate_outfits(garments: list[GarmentAttributes], context: UserContext | None = None):

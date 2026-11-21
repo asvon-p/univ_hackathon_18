@@ -12,6 +12,7 @@ from backend.app.adapters.weather import OpenMeteoWeather
 from backend.app.core.config import get_settings
 from backend.app.deps import get_weather
 from backend.app.main import create_app
+from backend.tests.test_remaining_forecast import hourly_day
 
 
 async def respond(request):
@@ -26,13 +27,18 @@ async def respond(request):
         return httpx.Response(503)
     if float(request.url.params["longitude"]) == 0:
         return httpx.Response(503)
-    return httpx.Response(
-        200,
-        json={
-            "current_units": {"temperature_2m": "°C", "time": "unixtime"},
-            "current": {"temperature_2m": 6.5, "weather_code": 0, "time": int(datetime.now(UTC).timestamp())},
-        },
-    )
+    body = {
+        "current_units": {"temperature_2m": "°C", "time": "unixtime"},
+        "current": {"temperature_2m": 6.5, "weather_code": 0, "time": int(datetime.now(UTC).timestamp())},
+    }
+    if scenario.get("forecast"):
+        points = hourly_day(datetime.now(UTC), low=scenario.get("low", 3), high=scenario.get("high", 3))
+        body["hourly_units"] = {"time": "unixtime", "temperature_2m": "°C"}
+        body["hourly"] = {
+            "time": [int(p.at.timestamp()) for p in points],
+            "temperature_2m": [p.temperature_c for p in points],
+        }
+    return httpx.Response(200, json=body)
 
 
 app = create_app()

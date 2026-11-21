@@ -61,6 +61,7 @@ def test_key_and_result_are_scoped_to_logged_in_owner(
         assert api_client.get(PATH + suffix).status_code == 401
     add_garment(other, "top")
     add_garment(other, "bottom")
+    add_garment(other, "outerwear")
     other_result = post(api_client, other, key)
     assert other_result.status_code == 201
     assert other_result.json()["recommendation_id"] != result["recommendation_id"]
